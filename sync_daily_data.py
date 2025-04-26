@@ -27,7 +27,7 @@ def get_last_trade_date(symbol):
 def fetch_data(symbol, start_date, end_date):
     """调用 AkShare 拉取数据（封装）"""
     try:
-        df = ak.stock_zh_a_hist(symbol=symbol, start_date=start_date, end_date=end_date, period="daily", adjust="")
+        df = ak.stock_zh_a_hist(symbol=symbol, start_date=start_date, end_date=end_date, period="daily", adjust="qfq")
         if df.empty:
             return None
         df.rename(columns={
