@@ -1,4 +1,6 @@
 # strategies/multi_level_cross_strategy.py
+import os
+
 import pandas as pd
 import numpy as np
 from typing import List, Dict
@@ -149,7 +151,10 @@ if __name__ == "__main__":
 
     # 4. 可选：保存成CSV文件
     if final_signals:
+        # 确保上一级目录的output文件夹存在
+        os.makedirs('../output', exist_ok=True)  # 使用 `../` 表示上一级目录
+
         df_final = pd.DataFrame(final_signals)
-        filename = f"final_signals_{end_date}.csv"
+        filename = f"../output/final_signals_{end_date}.csv"  # 保存在上一级目录的output下
         df_final.to_csv(filename, index=False, encoding='utf-8-sig')
         print(f"✅ 已保存信号到 {filename}")
