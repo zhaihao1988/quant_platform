@@ -76,7 +76,7 @@ def sync_all_data():
             # 新股：从上市时间开始全量下载
             start_date = list_date
 
-        if start_date >= today:
+        if start_date > today:
             print(f"⏩ {symbol} 无需更新")
             continue
 
