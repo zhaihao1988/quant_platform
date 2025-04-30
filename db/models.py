@@ -38,3 +38,16 @@ class StockDaily(Base):
     pct_change = Column(Float)                       # 涨跌幅（%）
     price_change = Column(Float)                     # 涨跌额（元）
     turnover = Column(Float)                         # 换手率（%）
+
+class StockDisclosure(Base):
+    """
+    A股上市公司公告表，对应 stock_disclosure 表
+    """
+    __tablename__ = "stock_disclosure"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(10), nullable=False, index=True)       # 股票代码
+    short_name = Column(String(50), nullable=True)                # 股票简称
+    title = Column(String(500), nullable=False)                   # 公告标题
+    ann_date = Column(Date, nullable=False, index=True)           # 公告日期
+    url = Column(String(500), nullable=False)                     # 公告链接

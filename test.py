@@ -1,9 +1,4 @@
-from anythingllm import LLM
+import akshare as ak
 
-# 本地模型示例：使用 Ollama 提供的 deepseek-r1:14b
-model = LLM(provider='Ollama', model_name='deepseek-r1:14b')
-# 也可以配置 HTTP API endpoint
-# model = LLM(api_url='http://localhost:8000/api', api_key='YOUR_API_KEY')
-
-response = model.chat("1 + 1 = ?")
-print(response)
+stock_financial_debt_ths_df = ak.stock_financial_debt_ths(symbol="000001", indicator="按报告期")
+print(stock_financial_debt_ths_df)
