@@ -4,7 +4,7 @@ import pandas as pd
 from sqlalchemy import text
 from db.database import get_engine, get_session
 from utils.scraper import fetch_announcement_text
-
+from rag.retriever import add_documents
 engine = get_engine()
 
 def load_price_data(symbol: str, window: int = 90) -> pd.DataFrame:
@@ -45,5 +45,9 @@ def load_announcements(symbol: str, top_n: int = 3) -> list[str]:
     for url in df["url"]:
         text = fetch_announcement_text(url)
         if text:
-            texts.append(text[:1000])  # 截取前1000字符
+            snippet = text[:10000]  # 截取前10000字符
+            texts.append(snippet)
+    # 立即添加到向量库，持久化
+    if texts:
+        add_documents(symbol, texts)
     return texts

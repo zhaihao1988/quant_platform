@@ -11,7 +11,7 @@ from config.settings import settings  # 全局配置，包括模型名、邮件�
 from rag.loader import load_price_data, load_financial_data, load_announcements  # 数据加载模块
 from rag.retriever import retrieve_context  # 向量检索模块（Chroma） :contentReference[oaicite:2]{index=2}
 from rag.prompting import deep_template  # 自定义深度分析 PromptTemplate
-
+from rag.news import search_stock_news
 def summarize_price(df: pd.DataFrame) -> str:
     """
     将交易 DataFrame 汇总为文本，包括最近 5 日平均收盘价、最高、最低等信息。
@@ -47,11 +47,12 @@ def generate_deep_report(
     price_df = load_price_data(symbol)  # 从 PostgreSQL 读取日线数据
     fin_data = load_financial_data(symbol)  # 读取最新一期利润表 JSONB
     announcements = load_announcements(symbol, top_n=5)  # 抓取最近公告正文
-
+    # 额外检索线上新闻
+    news_snippets = search_stock_news(symbol, num=3)
     # 2) RAG 检索公告上下文
-    # 合并公告文本用于检索
-    query = " ".join(announcements)
-    news_context = "\n".join(retrieve_context(query, k=3))  # Chroma 相似度搜索 :contentReference[oaicite:3]{index=3}
+    # 2) RAG 检索公告上下文
+    query = " ".join(announcements + news_snippets)
+    news_context = "\n".join(retrieve_context(query, k=3))
 
     # 3) 汇总交易与财务文本
     price_summary = summarize_price(price_df)
