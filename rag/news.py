@@ -3,7 +3,7 @@
 import requests
 from utils.scraper import fetch_announcement_text  # re-use PDF/HTML parser
 
-API_KEY = "<YOUR_GOOGLE_API_KEY>"
+API_KEY = "AIzaSyB0Kv14UpjEDv59HEOV4ducTqaPk8633L8"
 CX = "533a067c36f9d48f1"
 
 def search_stock_news(symbol: str, num: int = 3) -> list[str]:
