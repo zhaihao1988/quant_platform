@@ -2,7 +2,7 @@
 
 from chromadb import Client
 from chromadb.config import Settings
-from langchain.vectorstores import Chroma
+from langchain_community.vectorstores import Chroma
 from rag.embeddings import Embedder
 
 # 本地持久化目录
