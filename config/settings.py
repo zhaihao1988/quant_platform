@@ -1,5 +1,6 @@
 import os
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings
+from pydantic import Field, RedisDsn
 
 
 class Settings(BaseSettings):
@@ -15,6 +16,6 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
-
+        env_file_encoding = "utf-8"
 
 settings = Settings()
