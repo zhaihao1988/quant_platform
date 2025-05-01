@@ -1,6 +1,6 @@
 # rag/retriever.py
 
-from chromadb import Client
+from chromadb import Client, PersistentClient
 from chromadb.config import Settings
 from langchain_community.vectorstores import Chroma
 from rag.embeddings import Embedder
@@ -9,10 +9,7 @@ from rag.embeddings import Embedder
 PERSIST_DIR = "./chroma_db"
 
 # 初始化 Client 与集合
-_chroma_client = Client(Settings(
-    chroma_db_impl="duckdb+parquet",
-    persist_directory=PERSIST_DIR
-))
+_chroma_client = PersistentClient(path=PERSIST_DIR, settings=Settings())
 
 def get_vectorstore():
     embedder = Embedder()
