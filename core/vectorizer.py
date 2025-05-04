@@ -1,6 +1,7 @@
 # rag/vectorizer.py
 import requests
 import time
+
 import random
 import logging
 from io import BytesIO
@@ -8,6 +9,8 @@ from pypdf import PdfReader
 from bs4 import BeautifulSoup
 import re
 from sqlalchemy.orm import Session
+
+from data_processing.scraper import fetch_announcement_text
 # 使用您正确的模型路径
 from db.models import StockDisclosure
 # from db.database import SessionLocal # 如果需要独立运行测试

@@ -5,10 +5,10 @@ import time
 from sqlalchemy.orm import Session
 
 # --- 项目模块导入 (根据你的最终目录结构调整) ---
-from db.database import Session, engine # 假设包含 SessionLocal 和 engine
+from db.database import  get_session  # 假设包含 SessionLocal 和 engine
 from db import models # 导入模型以创建表（如果需要）
 from db.crud import get_stock_list_info, retrieve_relevant_disclosures # 添加 retrieve 用于获取价格上下文相关公告
-from data_processing.loader import load_announcements_to_scrape
+from data_processing.loader import load_announcements
 from data_processing.scraper import scrape_and_store_announcements, embed_existing_content # 导入嵌入现有内容的函数
 from core.prompting import generate_stock_report
 from integrations.email_sender import send_email
@@ -33,7 +33,7 @@ def create_database_tables():
 
 def get_recent_price_context(db: Session, symbol: str, days: int = 5) -> str:
      """从 StockDaily (如果数据已填充) 获取最近N日价格变动信息"""
-     from database.models import StockDaily # 在函数内导入避免循环依赖或放在crud中
+     from db.models import StockDaily # 在函数内导入避免循环依赖或放在crud中
      from sqlalchemy import desc
      import pandas as pd
 
@@ -166,7 +166,7 @@ def main():
     # --- 初始化 ---
     start_time = time.time()
     create_database_tables() # 确保表存在
-    db: Session = SessionLocal()
+    db: Session = get_session()
 
     target_symbols = []
     if args.symbol:
