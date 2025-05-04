@@ -215,7 +215,7 @@ if __name__ == "__main__":
     driver = webdriver.Chrome(options=chrome_options)
 
     # 注入反检测脚本
-    with open('./stealth.min.js') as f:
+    with open('../stealth.min.js') as f:
         stealth_script = f.read()
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": stealth_script
@@ -229,7 +229,7 @@ if __name__ == "__main__":
         # 获取目标页面
         pdf_links = extract_pdf_links_enhanced(driver, target_url)
 
-        with open("result.txt", "w", encoding="utf-8") as f:
+        with open("../result.txt", "w", encoding="utf-8") as f:
             f.write("提取到的PDF链接：\n")
             for link in pdf_links:
                 f.write(f"{link}\n")

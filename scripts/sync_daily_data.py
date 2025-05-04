@@ -1,4 +1,4 @@
-# sync_daily_data.py
+# scripts/sync_daily_data.py
 import akshare as ak
 import pandas as pd
 from datetime import datetime, timedelta

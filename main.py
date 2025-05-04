@@ -1,224 +1,202 @@
-# main.py (示例，结合了数据处理和报告生成)
+# main.py
 import argparse
 import logging
 import time
+import os
 from sqlalchemy.orm import Session
 
-# --- 项目模块导入 (根据你的最终目录结构调整) ---
-from db.database import  get_session  # 假设包含 SessionLocal 和 engine
-from db import models # 导入模型以创建表（如果需要）
-from db.crud import get_stock_list_info, retrieve_relevant_disclosures # 添加 retrieve 用于获取价格上下文相关公告
-from data_processing.loader import load_announcements
-from data_processing.scraper import scrape_and_store_announcements, embed_existing_content # 导入嵌入现有内容的函数
-from core.prompting import generate_stock_report
-from integrations.email_sender import send_email
-from config import settings # 导入配置，可能需要接收邮件地址
+# --- Project Modules ---
+from db.database import get_db_session, create_database_tables # Use context manager for session
+from db import crud # Import crud module
+from data_processing import loader, scraper # Import loader and scraper
+from core import vectorizer, prompting # Import vectorizer and prompting
+from integrations import email_sender
+from config import settings # Import settings for report path and email recipient
 
-# --- 日志配置 ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logging.getLogger('urllib3').setLevel(logging.WARNING) # 减少 requests 的日志噪音
-logging.getLogger('sentence_transformers').setLevel(logging.WARNING) # 减少 embedding 模型的日志噪音
-logger = logging.getLogger(__name__)
+# --- Basic Logging Setup ---
+# Configure logging level, format, and output (e.g., file and console)
+log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+logging.basicConfig(level=logging.INFO, format=log_format)
+# Reduce noise from libraries if needed
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('selenium').setLevel(logging.INFO) # Show Selenium startup/shutdown
+logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
+logging.getLogger('ollama').setLevel(logging.INFO) # Show Ollama calls
 
-def create_database_tables():
-    """创建数据库表 (如果尚不存在)"""
-    logger.info("Creating database tables if they don't exist...")
-    try:
-        models.Base.metadata.create_all(bind=engine)
-        logger.info("Database tables checked/created.")
-    except Exception as e:
-        logger.error(f"Error creating database tables: {e}")
-        # 根据情况决定是否退出
-        # exit(1)
+logger = logging.getLogger(__name__) # Logger for main script
 
-def get_recent_price_context(db: Session, symbol: str, days: int = 5) -> str:
-     """从 StockDaily (如果数据已填充) 获取最近N日价格变动信息"""
-     from db.models import StockDaily # 在函数内导入避免循环依赖或放在crud中
-     from sqlalchemy import desc
-     import pandas as pd
+# --- Helper Function for Data Processing ---
+def run_data_processing(db: Session, symbol: str):
+    """
+    Runs the data processing pipeline for a single stock:
+    1. Finds disclosures needing content.
+    2. Scrapes text content for them.
+    3. Generates embeddings.
+    4. Updates the database.
+    """
+    logger.info(f"--- Starting Data Processing for: {symbol} ---")
+    processed_count = 0
+    failed_count = 0
 
-     context = f"最近 {days} 个交易日股价变动及归因：\n"
-     try:
-          recent_data = db.query(StockDaily).filter(
-               StockDaily.symbol == symbol
-          ).order_by(
-               desc(StockDaily.date)
-          ).limit(days).all()
+    # 1. Find disclosures needing content
+    disclosures_to_process = loader.get_disclosures_needing_content(db, symbol)
 
-          if not recent_data:
-               context += "[数据库中未找到最近股价数据]\n"
-               return context
+    if not disclosures_to_process:
+        logger.info(f"No new disclosures requiring processing found for {symbol}.")
+        return
 
-          # 将数据逆序，按时间从早到晚排列
-          recent_data.reverse()
+    logger.info(f"Found {len(disclosures_to_process)} disclosures to process for {symbol}.")
 
-          # 使用 Pandas 方便计算和展示 (可选，也可以手动格式化)
-          # 需要安装 pandas: pip install pandas
-          df = pd.DataFrame([(d.date, d.close, d.pct_change) for d in recent_data], columns=['Date', 'Close', 'PctChange'])
-          df['Date'] = pd.to_datetime(df['Date']).dt.strftime('%Y-%m-%d') # 格式化日期
+    for disclosure in disclosures_to_process:
+        logger.info(f"Processing Disclosure ID: {disclosure.id}, Title: {disclosure.title[:50]}...")
+        text_content = None
+        embedding_vector = None
+        try:
+            # 2. Scrape text content
+            text_content = scraper.fetch_announcement_text(disclosure.url, disclosure.title)
+            if not text_content:
+                logger.warning(f"Failed to fetch/extract text for Disclosure ID: {disclosure.id}. Skipping.")
+                failed_count += 1
+                continue # Skip to next disclosure if scraping fails
 
-          first_day = df.iloc[0]
-          last_day = df.iloc[-1]
-          overall_change = ((last_day['Close'] - first_day['Close']) / first_day['Close']) * 100 if first_day['Close'] else 0
+            logger.info(f"Successfully scraped text (length: {len(text_content)}) for Disclosure ID: {disclosure.id}")
 
-          context += f"  从 {first_day['Date']} (收盘价: {first_day['Close']:.2f}) 到 {last_day['Date']} (收盘价: {last_day['Close']:.2f})，"
-          context += f"整体涨跌幅约为 {overall_change:.2f}%。\n"
-          context += "  每日简况:\n"
-          for _, row in df.iterrows():
-               change_str = f"{row['PctChange']:.2f}%" if row['PctChange'] is not None else "N/A"
-               context += f"    - {row['Date']}: 收盘价 {row['Close']:.2f}, 涨跌幅 {change_str}\n"
+            # 3. Generate embedding
+            embedding_vector = vectorizer.get_embedding(text_content, is_query=False)
+            if not embedding_vector:
+                logger.warning(f"Failed to generate embedding for Disclosure ID: {disclosure.id}. Vector will be NULL.")
+                # Still save the text content even if embedding fails
+            else:
+                logger.info(f"Successfully generated embedding vector for Disclosure ID: {disclosure.id}")
 
-          # 添加一个提示让 LLM 进行归因分析
-          context += "  请结合其他信息分析近期股价变动原因。\n"
+            # 4. Update database (commit handled by context manager later)
+            # We pass data to crud, crud updates the object in the session
+            update_successful = crud.update_disclosure_content_vector(
+                db=db, # Pass the session
+                disclosure_id=disclosure.id,
+                text_content=text_content,
+                vector=embedding_vector
+            )
+            if update_successful:
+                 processed_count += 1
+            else:
+                 failed_count += 1
+                 # Error already logged in crud function
 
-     except Exception as e:
-          logger.error(f"Error retrieving recent price data for {symbol}: {e}")
-          context += f"[获取股价数据时出错: {e}]\n"
+            # Optional: Add a small delay between processing each disclosure
+            time.sleep(random.uniform(1, 3))
 
-     return context
+        except Exception as e:
+            logger.error(f"Unhandled error processing Disclosure ID {disclosure.id}: {e}", exc_info=True)
+            failed_count += 1
+            # Continue to the next disclosure even if one fails unexpectedly
 
-
-def process_stock_data(db: Session, symbol: str):
-    """处理单个股票的数据：爬取、存储、嵌入"""
-    logger.info(f"--- Processing data for symbol: {symbol} ---")
-
-    # 1. 加载需要爬取的公告
-    announcements_to_scrape = load_announcements_to_scrape(db, symbol)
-    if announcements_to_scrape:
-         logger.info(f"Found {len(announcements_to_scrape)} new announcements to scrape for {symbol}.")
-         # 2. 爬取、存储、嵌入新公告
-         scrape_and_store_announcements(db, announcements_to_scrape)
-    else:
-         logger.info(f"No new announcements found requiring scraping for {symbol}.")
-
-    # 3. (可选) 为只有内容没有向量的旧数据生成向量
-    # 这个查询可能比较慢，可以考虑单独运行或优化
-    # logger.info(f"Checking for existing content needing embedding for {symbol}...")
-    # announcements_needing_vector = db.query(models.StockDisclosure).filter(
-    #      models.StockDisclosure.symbol == symbol,
-    #      models.StockDisclosure.raw_content != None,
-    #      models.StockDisclosure.content_vector == None
-    # ).all()
-    # if announcements_needing_vector:
-    #      logger.info(f"Found {len(announcements_needing_vector)} announcements with existing content needing embedding for {symbol}.")
-    #      for ann in announcements_needing_vector:
-    #           embed_existing_content(db, ann)
-    # else:
-    #      logger.info(f"No existing content found needing embedding for {symbol}.")
+    logger.info(f"--- Finished Data Processing for {symbol}. Processed: {processed_count}, Failed: {failed_count} ---")
 
 
-def run_analysis_and_email(db: Session, symbol: str, recipient_email: str | None, no_email: bool = False):
-     """为单个股票生成报告并通过邮件发送"""
-     logger.info(f"--- Generating report for symbol: {symbol} ---")
-
-     # --- 获取价格背景信息 ---
-     # 注意：这需要 StockDaily 表中有数据
-     price_context = get_recent_price_context(db, symbol, days=5)
-     logger.info(f"Generated price context for {symbol}:\n{price_context}")
-     # --- 如何将 price_context 传入 LLM？ ---
-     # 方案 A: 修改 generate_stock_report 接收 price_context 参数 (推荐)
-     # report = generate_stock_report(db, symbol, price_context=price_context)
-     # 方案 B: 在这里将 price_context 加入到 web_context 或 kb_context (不太好)
-
-     # 这里我们先用方案 A 的思路，需要修改 generate_stock_report 函数签名和内部 prompt 构建
-     # 暂时注释掉调用，因为 generate_stock_report 未修改
-     # report = generate_stock_report(db, symbol) # 旧调用方式
-     # logger.warning("Price context generated but not passed to generate_stock_report yet. Modify function signature.")
-     # 假设 generate_stock_report 已修改
-     report = generate_stock_report(db, symbol) # 使用已更新的 generate_stock_report
-     # 注意：目前的 generate_stock_report 内部会自行构建 price_context 的占位符
-     # 如果要传入真实的 price_context，需要修改 generate_stock_report
-
-     if report and not report.startswith("报告生成失败"):
-          logger.info(f"Report generated successfully for {symbol}.")
-          print(f"\n--- Report for {symbol} ---\n{report}\n--- End Report ---") # 打印到控制台
-
-          if not no_email and recipient_email:
-               subject = f"股票分析报告: {symbol}"
-               # body = report # 或者可以添加一些头部信息
-               email_body = f"这是为您生成的关于股票 {symbol} 的分析报告：\n\n{report}"
-               logger.info(f"Attempting to send report for {symbol} to {recipient_email}")
-               success = send_email(subject, email_body, recipient_email)
-               if success:
-                    logger.info(f"Report for {symbol} sent successfully to {recipient_email}.")
-               else:
-                    logger.error(f"Failed to send report email for {symbol} to {recipient_email}.")
-          elif no_email:
-               logger.info("Email sending skipped due to --no-email flag.")
-          else:
-               logger.warning("No recipient email provided, skipping email.")
-
-     else:
-          logger.error(f"Failed to generate report for {symbol}. Reason: {report}")
-
-
+# --- Main Execution Logic ---
 def main():
-    parser = argparse.ArgumentParser(description="Quant Platform: Stock Analysis Report Generator")
-    parser.add_argument("-s", "--symbol", type=str, help="Specify a single stock symbol (e.g., 600519).")
-    parser.add_argument("-a", "--all", action="store_true", help="Process all stocks in the StockList table.")
-    parser.add_argument("--skip-data", action="store_true", help="Skip data processing (scraping/embedding).")
-    parser.add_argument("--skip-report", action="store_true", help="Skip report generation and emailing.")
-    parser.add_argument("--no-email", action="store_true", help="Generate report but do not send email.")
-    parser.add_argument("-r", "--recipient", type=str, default=settings.EMAIL_USER, help="Email address to send the report to.") # 默认发送给自己
+    parser = argparse.ArgumentParser(description="Stock Analysis Report Generator using Local LLM and Knowledge Base.")
+    parser.add_argument("symbol", type=str, help="The stock symbol to analyze (e.g., 600519).")
+    parser.add_argument("--skip-data", action="store_true", help="Skip the data processing (scraping, embedding) phase.")
+    parser.add_argument("--recipient", type=str, default=settings.EMAIL_USER, help=f"Email address to send the report to (default: {settings.EMAIL_USER}).")
+    parser.add_argument("--no-email", action="store_true", help="Generate and save the report but do not send email.")
+    parser.add_argument("--force-report", action="store_true", help="Attempt to generate report even if data processing fails.")
 
     args = parser.parse_args()
+    symbol = args.symbol.strip() # Clean up input symbol
 
-    # --- 初始化 ---
+    logger.info(f"--- Starting Stock Analysis for: {symbol} ---")
     start_time = time.time()
-    create_database_tables() # 确保表存在
-    db: Session = get_session()
 
-    target_symbols = []
-    if args.symbol:
-        target_symbols.append(args.symbol)
-    elif args.all:
-        logger.info("Fetching all stock symbols from StockList...")
-        try:
-            all_stocks = db.query(models.StockList.code).all()
-            target_symbols = [s[0] for s in all_stocks]
-            logger.info(f"Found {len(target_symbols)} stocks to process.")
-        except Exception as e:
-            logger.error(f"Error fetching stock list: {e}")
-            target_symbols = [] # 出错则不处理
-    else:
-        # 默认行为：处理一个示例股票或提示用户
-        logger.warning("No specific symbol provided and --all flag not set. Processing example '600519'. Use -s SYMBOL or -a.")
-        target_symbols.append("600519") # 示例
-
-    if not target_symbols:
-         logger.error("No target symbols to process. Exiting.")
-         db.close()
-         return
-
-    # --- 执行流程 ---
+    # --- Database Initialization ---
     try:
-        # 1. 数据处理 (除非跳过)
-        if not args.skip_data:
-            logger.info("--- Starting Data Processing Phase ---")
-            for symbol in target_symbols:
-                process_stock_data(db, symbol)
-                time.sleep(1) # 短暂休眠，避免数据库压力过大（如果处理很快）
-            logger.info("--- Data Processing Phase Complete ---")
-        else:
-            logger.info("Skipping data processing phase.")
+        create_database_tables() # Ensure tables exist
+    except Exception as e:
+        logger.critical(f"Failed to initialize database tables: {e}. Exiting.")
+        return # Cannot proceed without DB tables
 
-        # 2. 报告生成与邮件发送 (除非跳过)
-        if not args.skip_report:
-            logger.info("--- Starting Report Generation Phase ---")
-            for symbol in target_symbols:
-                 run_analysis_and_email(db, symbol, args.recipient, args.no_email)
-                 time.sleep(5) # LLM 调用和邮件发送可能较慢，增加间隔
-            logger.info("--- Report Generation Phase Complete ---")
-        else:
-            logger.info("Skipping report generation phase.")
+    # --- Data Processing Phase ---
+    if not args.skip_data:
+        # Use the database session context manager
+        try:
+            with get_db_session() as db_session:
+                if db_session: # Check if session was created successfully
+                     run_data_processing(db_session, symbol)
+                else:
+                     logger.error("Failed to get database session for data processing.")
+                     if not args.force_report: # Stop if DB fails and not forcing report
+                          return
+        except Exception as e:
+            logger.error(f"Error during data processing phase for {symbol}: {e}", exc_info=True)
+            if not args.force_report: # Stop if data processing fails and not forcing report
+                 logger.critical("Exiting due to data processing error.")
+                 return
+            else:
+                 logger.warning("Data processing failed, but continuing to report generation due to --force-report flag.")
+    else:
+        logger.info("Skipping data processing phase as requested.")
+
+    # --- Report Generation Phase ---
+    logger.info(f"--- Starting Report Generation for: {symbol} ---")
+    report_content = None
+    try:
+        # Get a new session for report generation (or reuse if feasible, but separation is often cleaner)
+        with get_db_session() as db_session:
+             if db_session:
+                  report_content = prompting.generate_stock_report(db_session, symbol)
+             else:
+                  logger.error("Failed to get database session for report generation.")
 
     except Exception as e:
-        logger.exception(f"An error occurred during the main process: {e}") # 使用 exception 记录堆栈跟踪
-    finally:
-        db.close()
-        end_time = time.time()
-        logger.info(f"Total execution time: {end_time - start_time:.2f} seconds.")
-        logger.info("Quant Platform finished.")
+        logger.error(f"Error during report generation phase for {symbol}: {e}", exc_info=True)
+
+
+    # --- Save Report and Send Email ---
+    if report_content:
+        logger.info(f"Report generated successfully for {symbol}.")
+
+        # 1. Save report locally
+        report_filename = f"{symbol}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        save_path = os.path.join(settings.REPORT_SAVE_PATH, report_filename)
+        try:
+            with open(save_path, 'w', encoding='utf-8') as f:
+                f.write(report_content)
+            logger.info(f"Report saved locally to: {save_path}")
+        except IOError as e:
+            logger.error(f"Failed to save report to {save_path}: {e}")
+
+        # 2. Send email (if not disabled)
+        if not args.no_email:
+            if args.recipient:
+                logger.info(f"Attempting to send report via email to: {args.recipient}")
+                email_subject = f"Stock Analysis Report: {symbol}"
+                # Use a slightly different body for email if needed
+                email_body = f"Stock analysis report for {symbol} generated on {time.strftime('%Y-%m-%d %H:%M:%S')}.\n\n" + report_content
+                send_success = email_sender.send_email(email_subject, email_body, args.recipient)
+                if send_success:
+                    logger.info("Report email sent successfully.")
+                else:
+                    logger.error("Failed to send report email.")
+            else:
+                logger.warning("No recipient email address provided (--recipient). Skipping email.")
+        else:
+            logger.info("Email sending skipped due to --no-email flag.")
+
+    else:
+        logger.error(f"Report generation failed for {symbol}. No report to save or send.")
+
+    # --- Finalization ---
+    end_time = time.time()
+    logger.info(f"--- Stock Analysis for {symbol} Finished. Total time: {end_time - start_time:.2f} seconds ---")
+
 
 if __name__ == "__main__":
+    # --- Setup before running main ---
+    # Load .env file if it exists (pydantic-settings does this automatically if configured)
+    from dotenv import load_dotenv
+    load_dotenv()
+    logger.info(".env file loaded (if exists).")
+
+    # --- Run Main Application ---
     main()

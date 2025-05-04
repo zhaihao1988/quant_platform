@@ -1,4 +1,4 @@
-# sync_stock_list.py
+# scripts/sync_stock_list.py
 import akshare as ak
 import pandas as pd
 from sqlalchemy.orm import sessionmaker

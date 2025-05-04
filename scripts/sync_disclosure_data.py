@@ -1,4 +1,4 @@
-# sync_disclosure_data.py
+# scripts/sync_disclosure_data.py
 
 import time
 from datetime import datetime, timedelta

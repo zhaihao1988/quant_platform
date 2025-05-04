@@ -1,81 +1,97 @@
-# db/crud.py
+# database/crud.py
 import logging
 from sqlalchemy.orm import Session
-# 使用您正确的模型路径
-from .models import StockDisclosure, StockList # 导入 StockList
-# 假设向量嵌入模型在此处加载或从 vectorizer 模块导入
-from sentence_transformers import SentenceTransformer
+from typing import List, Optional
+
+# Use correct path for models
+from .models import StockDisclosure, StockList, StockFinancial, StockDaily
+# Import the centralized embedding function
+from core.vectorizer import get_embedding
 
 logger = logging.getLogger(__name__)
 
-# --- 嵌入模型加载 (应与 scraper 中一致，或从公共模块导入) ---
-embedding_model_name_crud = 'shibing624/text2vec-base-chinese'
-embedding_dim_crud = 768 # 确保维度一致
-try:
-    embedding_model_crud = SentenceTransformer(embedding_model_name_crud)
-    loaded_dim_crud = embedding_model_crud.get_sentence_embedding_dimension()
-    if loaded_dim_crud != embedding_dim_crud:
-        logger.warning(f"[CRUD] Model '{embedding_model_name_crud}' dimension ({loaded_dim_crud}) does not match expected dimension ({embedding_dim_crud})!")
-    logger.info(f"Loaded embedding model '{embedding_model_name_crud}' in crud.")
-except Exception as e:
-    logger.error(f"Failed to load sentence transformer model in crud: {e}")
-    embedding_model_crud = None
+# Remove redundant embedding model loading from here
 
-def get_text_embedding_crud(text: str) -> list[float] | None:
-    """为查询文本生成嵌入"""
-    if not embedding_model_crud or not text:
-        return None
+def get_stock_list_info(db: Session, symbol: str) -> Optional[StockList]:
+    """Gets basic stock information (name, industry) from the StockList table."""
+    logger.debug(f"Querying StockList for symbol: {symbol}")
     try:
-        # 考虑查询文本的长度限制（虽然通常较短）
-        embedding = embedding_model_crud.encode(text, convert_to_tensor=False)
-        return embedding.tolist()
-    except Exception as e:
-        logger.error(f"Error generating query embedding: {e}")
-        return None
-# --- 嵌入逻辑结束 ---
-
-def get_stock_list_info(db: Session, symbol: str) -> StockList | None: # 重命名函数并使用 StockList
-    """获取股票列表中的基本信息 (如名称)"""
-    try:
-        # 使用 code 字段查询
         stock_info = db.query(StockList).filter(StockList.code == symbol).first()
         if not stock_info:
             logger.warning(f"No entry found in stock_list for code: {symbol}")
         return stock_info
     except Exception as e:
-        logger.error(f"Error getting stock list info for {symbol}: {e}")
+        logger.error(f"Error getting stock list info for {symbol}: {e}", exc_info=True)
         return None
 
-def retrieve_relevant_disclosures(db: Session, symbol: str, query_text: str, top_k: int = 5) -> list[StockDisclosure]:
+def retrieve_relevant_disclosures(db: Session, symbol: str, query_text: str, top_k: int = 5) -> List[StockDisclosure]:
     """
-    从本地知识库检索与查询文本最相关的公告内容。
-    使用 content_vector 进行搜索，返回包含 raw_content 的对象。
+    Retrieves relevant disclosures from the knowledge base using vector similarity search.
     """
-    if not embedding_model_crud:
-        logger.error("Embedding model not loaded, cannot perform vector search.")
-        return []
+    logger.info(f"Retrieving relevant disclosures for symbol '{symbol}' with query: '{query_text[:50]}...'")
 
-    query_embedding = get_text_embedding_crud(query_text)
+    # Generate embedding for the query text using the centralized vectorizer
+    query_embedding = get_embedding(query_text, is_query=True)
+
     if not query_embedding:
-        logger.error("Failed to generate embedding for the query text.")
+        logger.error("Failed to generate embedding for the query text. Cannot perform vector search.")
         return []
 
     try:
-        logger.info(f"Performing vector search for symbol '{symbol}' with query '{query_text}'")
-        # 使用 content_vector 和余弦距离进行搜索
+        # Perform vector search using cosine distance (or other distance metric)
+        # Ensure the vector column and query embedding dimension match
         similar_disclosures = db.query(StockDisclosure).filter(
             StockDisclosure.symbol == symbol,
-            StockDisclosure.content_vector != None # 确保向量存在
+            StockDisclosure.content_vector != None # Only search items with vectors
         ).order_by(
-            StockDisclosure.content_vector.cosine_distance(query_embedding) # type: ignore
+            StockDisclosure.content_vector.cosine_distance(query_embedding) # Assumes cosine distance is preferred
         ).limit(top_k).all()
 
-        logger.info(f"Found {len(similar_disclosures)} relevant disclosures in KB.")
-        # 返回完整的 StockDisclosure 对象，包含 raw_content 和 ann_date
+        logger.info(f"Found {len(similar_disclosures)} relevant disclosures in KB for query.")
         return similar_disclosures
 
     except Exception as e:
-        logger.error(f"Error during vector search for {symbol} with query '{query_text}': {e}")
+        # Catch potential errors from the vector operation or database query
+        logger.error(f"Error during vector search for {symbol} with query '{query_text[:50]}...': {e}", exc_info=True)
         return []
 
-# --- 其他可能的 CRUD 函数 ---
+def update_disclosure_content_vector(db: Session, disclosure_id: int, text_content: Optional[str], vector: Optional[List[float]]):
+    """
+    Updates the raw_content and content_vector for a specific disclosure.
+    Handles potential errors during the update.
+    Note: This commits changes immediately for the single disclosure.
+          For batch processing, consider committing outside this function.
+    """
+    logger.debug(f"Updating disclosure ID: {disclosure_id}")
+    try:
+        disclosure = db.query(StockDisclosure).filter(StockDisclosure.id == disclosure_id).first()
+        if not disclosure:
+            logger.error(f"Disclosure with ID {disclosure_id} not found for update.")
+            return False
+
+        update_fields = {}
+        if text_content is not None:
+            disclosure.raw_content = text_content
+            update_fields['raw_content'] = f"{len(text_content)} chars" if text_content else "empty"
+        if vector is not None:
+            disclosure.content_vector = vector
+            update_fields['content_vector'] = f"vector[{len(vector)}]" if vector else "empty"
+
+        if update_fields:
+            db.add(disclosure) # Add to session for update
+            # db.commit() # Commit immediately - remove if batching
+            logger.info(f"Updated fields {list(update_fields.keys())} for disclosure ID {disclosure_id}.")
+            return True
+        else:
+            logger.warning(f"No content or vector provided to update disclosure ID {disclosure_id}.")
+            return False
+
+    except Exception as e:
+        # db.rollback() # Rollback if commit was inside try block
+        logger.error(f"Error updating disclosure ID {disclosure_id}: {e}", exc_info=True)
+        return False
+
+# Add other necessary CRUD operations here, e.g., for saving StockDaily, StockFinancial data if needed by other parts of the system.
+# Example:
+# def save_stock_daily_data(db: Session, data: List[Dict]): ...
+# def save_stock_financial_data(db: Session, symbol: str, report_type: str, report_date: Date, data: Dict): ...

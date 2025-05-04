@@ -1,230 +1,302 @@
-# rag/prompting.py
-
-# prompting.py
+# core/prompting.py
 import logging
+import pandas as pd
 from sqlalchemy.orm import Session
-import ollama # 导入 ollama 库
-from db.models import StockDisclosure
-# 导入您的配置
+import ollama # Ollama client library
+from typing import Optional, Dict, Any
+
+# Import settings and utility functions/classes
 from config import settings
-# 使用正确的 crud 函数和 web_search 函数
-from db.crud import retrieve_relevant_disclosures, get_stock_list_info # 使用 get_stock_list_info
-from integrations.web_search import search_financial_news_google # 使用 Google CSE 搜索函数
+from db.models import StockDisclosure # Only need StockDisclosure for type hint here
+from db.crud import get_stock_list_info, retrieve_relevant_disclosures
+from data_processing.loader import load_price_data, load_financial_data # Load data here
+from integrations.web_search import search_financial_news_google
 
 logger = logging.getLogger(__name__)
 
-# --- Local LLM Interaction using Ollama ---
-def call_local_llm(prompt: str, max_tokens: int = 4096) -> str:
+# --- Ollama LLM Interaction ---
+def call_local_llm(prompt: str) -> str:
     """
-    调用本地 Ollama 模型生成文本。
-    使用 config.settings 中的 OLLAMA_MODEL。
+    Calls the configured local Ollama model to generate text based on the prompt.
     """
     model_name = settings.OLLAMA_MODEL
-    logger.info(f"Calling local Ollama model: '{model_name}'. Prompt length: {len(prompt)}")
+    # Consider adding max_tokens to settings if needed, otherwise Ollama defaults apply
+    # max_tokens = settings.OLLAMA_MAX_TOKENS
+
+    logger.info(f"Calling local Ollama model: '{model_name}'. Prompt length: {len(prompt)} chars.")
+    if not model_name:
+        logger.error("OLLAMA_MODEL not configured in settings.")
+        return "Error: LLM model name not configured."
+
     try:
-        # 确保 Ollama 服务正在运行
+        # Ensure the Ollama service is running locally or at the specified host
         response = ollama.generate(
             model=model_name,
             prompt=prompt,
-            # stream=False, # 等待完整响应
-            # options={"num_predict": max_tokens} # Ollama 可能使用 num_predict 或其他参数控制长度
+            # stream=False, # Keep stream False for a single complete response
+            # options={'num_predict': max_tokens} # Control output length if needed, check Ollama docs for param name
         )
-        logger.info(f"Ollama generation complete. Response length: {len(response.get('response', ''))}")
-        return response.get('response', '') # 提取生成的文本
+        generated_text = response.get('response', '').strip()
+        logger.info(f"Ollama generation complete. Response length: {len(generated_text)} chars.")
+        if not generated_text:
+             logger.warning("Ollama model returned an empty response.")
+             return "Error: LLM returned an empty response."
+        return generated_text
 
     except ollama.ResponseError as e:
-         logger.error(f"Ollama API Error: {e.status_code} - {e.error}")
-         return f"Error: Ollama API request failed ({e.status_code} - {e.error}). Please ensure Ollama server is running and the model '{model_name}' is available."
+        # Handle specific Ollama API errors (e.g., model not found, connection error)
+        logger.error(f"Ollama API Error: Status Code {e.status_code}, Error: {e.error}", exc_info=True)
+        return (f"Error: Ollama API request failed ({e.status_code} - {e.error}). "
+                f"Ensure Ollama server is running and model '{model_name}' is available/pulled.")
     except Exception as e:
-        logger.error(f"Error calling local Ollama model '{model_name}': {e}")
-        # 返回更详细的错误信息
-        return f"Error generating response from local LLM '{model_name}': {e}. Check connection and model availability."
+        # Catch other potential errors (network issues, library errors)
+        logger.error(f"Error calling local Ollama model '{model_name}': {e}", exc_info=True)
+        return f"Error: Failed to generate response from LLM '{model_name}'. Check logs for details."
 
 
-# --- 格式化函数 (使用 raw_content, ann_date) ---
-def format_kb_results(disclosures: list[StockDisclosure]) -> str: # Type hint 使用 StockDisclosure
-    """格式化知识库检索结果"""
+# --- Context Formatting Functions ---
+def format_kb_results(disclosures: list[StockDisclosure]) -> str:
+    """Formats retrieved knowledge base disclosures for the prompt."""
     if not disclosures:
-        return "本地知识库未找到直接相关的历史公告。\n"
+        return "本地知识库: 未找到相关历史公告。\n"
 
-    formatted = "来自本地知识库的相关信息摘要：\n\n"
+    formatted = "--- 本地知识库 (相关历史公告摘要) ---\n"
     for i, disc in enumerate(disclosures):
-        # 使用 raw_content
-        content_snippet = disc.raw_content[:500] + "..." if disc.raw_content and len(disc.raw_content) > 500 else disc.raw_content
-        # 使用 ann_date
+        # Use raw_content and ann_date as per the model
+        content_snippet = disc.raw_content[:600] + "..." if disc.raw_content and len(disc.raw_content) > 600 else disc.raw_content # Slightly longer snippet
         publish_date_str = disc.ann_date.strftime('%Y-%m-%d') if disc.ann_date else "N/A"
-        formatted += f"{i+1}. **《{disc.title}》 ({publish_date_str})**\n"
-        formatted += f"   摘要: {content_snippet}\n\n" # 这里是原始内容摘要，非LLM总结
+        formatted += f"{i+1}. 《{disc.title}》 ({publish_date_str})\n"
+        formatted += f"   摘要: {content_snippet}\n\n"
+    formatted += "--- 知识库信息结束 ---\n"
     return formatted
 
 def format_web_results(results: list[dict]) -> str:
-    """格式化网络搜索结果 (来自 Google CSE 的 snippet)"""
+    """Formats web search results (snippets) for the prompt."""
     if not results:
-        return "网络搜索未找到近期的相关信息。\n"
+        return "网络搜索: 未找到近期相关信息。\n"
 
-    formatted = "近期网络信息摘要 (来源 Google Search / 指定财经网站):\n\n"
+    formatted = "--- 近期网络信息 (搜索结果摘要) ---\n"
     for i, res in enumerate(results):
-        formatted += f"{i+1}. **{res.get('title', 'N/A')}**\n"
-        # 使用 snippet
-        formatted += f"   摘要 (Snippet): {res.get('snippet', 'N/A')}\n"
-        # formatted += f"   链接: {res.get('link', '#')}\n\n" # 可选
+        formatted += f"{i+1}. {res.get('title', 'N/A')}\n"
+        # Use the snippet from Google CSE
+        formatted += f"   摘要: {res.get('snippet', 'N/A')}\n"
+        # formatted += f"   链接: {res.get('link', '#')}\n" # Optionally include link
         formatted += "\n"
+    formatted += "--- 网络信息结束 ---\n"
     return formatted
 
-# --- Prompt 构建函数 (保持不变，但调用处使用 company_name) ---
-def generate_stock_report_prompt(symbol: str, company_name: str, kb_context: str, web_context: str) -> str:
-    # ... (之前的 generate_stock_report_prompt 函数代码不变, 确保占位符 {symbol} {company_name} 正确) ...
+def format_price_data(df_price: Optional[pd.DataFrame]) -> str:
+    """Formats recent price data for the prompt."""
+    if df_price is None or df_price.empty:
+        return "近期股价: [数据库中无可用数据]\n"
+
+    formatted = "--- 近期股价表现 (最近 {} 个交易日) ---\n".format(len(df_price))
+    try:
+        df_price['Date'] = pd.to_datetime(df_price['date']).dt.strftime('%Y-%m-%d')
+        first_day = df_price.iloc[0]
+        last_day = df_price.iloc[-1]
+        overall_change = ((last_day['close'] - first_day['close']) / first_day['close']) * 100 if first_day['close'] else 0
+
+        formatted += f"时间范围: {first_day['Date']} 至 {last_day['Date']}\n"
+        formatted += f"期间收盘价变动: 从 {first_day['close']:.2f} 到 {last_day['close']:.2f} (涨跌幅: {overall_change:.2f}%)\n"
+        formatted += "每日概览:\n"
+        # Display first, middle, last day for brevity, or all if few days
+        indices_to_show = [0, len(df_price)//2, len(df_price)-1] if len(df_price) > 3 else range(len(df_price))
+        for i in sorted(list(set(indices_to_show))): # Show unique indices in order
+             row = df_price.iloc[i]
+             change_str = f"{row.get('pct_change', float('nan')):.2f}%" # Handle missing pct_change
+             volume_str = f"{int(row.get('volume', 0))}手"
+             turnover_str = f"{row.get('turnover', float('nan')):.2f}%"
+             formatted += f"  - {row['Date']}: 收盘价 {row['close']:.2f} (涨跌幅 {change_str}), 成交量 {volume_str}, 换手率 {turnover_str}\n"
+        formatted += "---\n"
+    except Exception as e:
+        logger.error(f"Error formatting price data: {e}", exc_info=True)
+        formatted += "[格式化股价数据时出错]\n"
+    return formatted
+
+
+def format_financial_data(financials: Optional[Dict[str, Any]], report_type: str) -> str:
+    """Formats latest financial data (JSON) for the prompt."""
+    if not financials:
+        return f"最新{report_type}财务数据: [数据库中无可用数据]\n"
+
+    formatted = f"--- 最新{report_type}财务数据 (摘要) ---\n"
+    try:
+        # Extract and display key metrics based on report_type
+        # This requires knowing the structure of your JSON data
+        if report_type == 'benefit' and isinstance(financials, dict): # Example for income statement
+            key_metrics = {
+                "营业总收入": financials.get("operating_income"),
+                "营业总成本": financials.get("operating_cost"),
+                "净利润": financials.get("net_profit"),
+                "基本每股收益": financials.get("basic_eps"),
+                # Add more relevant metrics...
+            }
+        elif report_type == 'balance' and isinstance(financials, dict): # Example for balance sheet
+             key_metrics = {
+                 "总资产": financials.get("total_assets"),
+                 "总负债": financials.get("total_liabilities"),
+                 "归属母公司所有者权益": financials.get("equity_attributable_to_parent"),
+                 "资产负债率": financials.get("debt_to_asset_ratio"),
+                 # Add more...
+             }
+        # Add elif for 'cashflow' etc.
+        else:
+             key_metrics = {"原始数据": str(financials)[:500] + "..."} # Fallback for unknown types
+
+        for key, value in key_metrics.items():
+             formatted += f"  {key}: {value if value is not None else 'N/A'}\n"
+        formatted += "---\n"
+
+    except Exception as e:
+        logger.error(f"Error formatting financial data ({report_type}): {e}", exc_info=True)
+        formatted += "[格式化财务数据时出错]\n"
+
+    return formatted
+
+
+# --- Prompt Generation ---
+def generate_stock_report_prompt(
+    symbol: str,
+    company_name: str,
+    kb_context: str,
+    web_context: str,
+    price_context: str,
+    financial_context: str # Added financial context
+    ) -> str:
+    """
+    Builds the final structured prompt string for the LLM.
+    """
     prompt = f"""
-请扮演一位资深的股票分析师，基于以下提供的背景信息和实时数据，为股票代码 {symbol} ({company_name}) 生成一份深度研究报告。
+角色：你是一位经验丰富、严谨客观的初级股票分析师。你的任务是基于提供的结构化信息，生成一份对中国A股上市公司的初步研究报告。请严格根据下方提供的信息进行分析，避免编造数据或信息之外的内容。如果信息不足，请明确指出。
 
-**报告要求：**
-1.  **客观全面：** 结合本地知识库（历史公告、报告原始文本摘要）和最新的网络信息（搜索结果摘要）进行分析。
-2.  **逻辑清晰：** 报告结构需包含以下部分，并确保各部分内容连贯。
-3.  **重点突出：** 明确公司的核心竞争力、增长逻辑、潜在风险及投资看点。
-4.  **数据支撑：** 财务数据部分需准确展示，并进行简要归因（依赖LLM基于上下文信息生成）。
-5.  **价值导向：** 估值分析需结合多种方法，并与同业进行对比（依赖LLM基于上下文信息生成）。
+目标：为股票代码 {symbol} ({company_name}) 生成一份研究报告。
 
-**背景信息：**
+可用信息源：
+1.  本地知识库：包含公司历史公告（如年报、半年报、调研、回购、股权激励）的原文摘要。
+2.  网络搜索：近期（约6个月内）来自主流财经网站的新闻摘要和分析片段。
+3.  近期股价：最近几个交易日的收盘价、涨跌幅、成交量等数据。
+4.  最新财务数据：最新一期财务报表（如利润表、资产负债表）的关键指标摘要。
 
---- 本地知识库信息 (历史公告原文摘要) ---
+报告结构要求：请严格按照以下序号和标题组织报告内容。
+
+--- 可用信息 ---
+
 {kb_context}
---- 本地知识庫信息结束 ---
-
---- 近期网络信息 (搜索结果摘要) ---
 {web_context}
---- 近期网络信息结束 ---
+{price_context}
+{financial_context}
 
-**请按照以下结构撰写报告：**
+--- 可用信息结束 ---
+
+
+--- 请生成以下结构的报告 ---
 
 **========================= 股票研究报告：{symbol} {company_name} =========================**
 
-**1. 公司概览与发展历程**
-   * 公司基本情况介绍 (来自 StockList 或 LLM 知识)。
-   * 关键发展里程碑或转折点。
+**1. 公司概览与主营业务**
+   * 基于已知信息（如来自StockList的行业、地域信息，或知识库/网络信息中提及的），简述公司主营业务和主要产品/服务。指出信息来源。
 
-**2. 主营业务与核心产品**
-   * 当前主营业务构成分析（例如，按产品、按地区）。
-   * 核心产品/服务矩阵介绍及其市场地位。
-   * 商业模式分析。
+**2. 近期市场表现分析**
+   * 结合【近期股价表现】数据，描述近期的股价趋势（涨跌幅度、成交量变化）。
+   * 尝试结合【近期网络信息】或【本地知识库】中的事件（如公告发布、行业新闻），对股价波动进行初步归因分析。如果无法找到明确原因，请说明。
 
-**3. 核心竞争力与技术壁垒**
-   * 公司的主要竞争优势（如品牌、技术、成本、渠道、牌照等）。
-   * 技术研发实力与专利情况（基于知识库信息或网络搜索）。
-   * 行业门槛及公司的护城河。
+**3. 近期关键基本面信息**
+   * 结合【最新财务数据】摘要，展示关键财务指标。
+   * 结合【本地知识库】和【近期网络信息】，总结近期（6个月内）是否有重要的公告（如重大合同、业绩预告、回购、股权激励、高管变动、重要调研纪要）。列出关键信息点。
+   * 结合【近期网络信息】，总结是否有行业层面的积极或消极动态与公司相关。
 
-**4. 同业对比分析**
-   * 选取 1-2 家主要竞争对手 (来自 StockList 的 industry 或 LLM 知识)。
-   * 在市场份额、盈利能力、产品、技术等方面进行简要对比，突出 {company_name} 的相对优势与劣势。
+**4. 核心竞争力与风险点（基于现有信息总结）**
+   * 根据【本地知识库】（年报讨论部分摘要）或【近期网络信息】（分析片段），尝试总结公司可能的核心竞争力（如品牌、技术、市场地位等）。
+   * 根据【本地知识库】（年报风险章节摘要）或【近期网络信息】，尝试总结公司面临的主要风险点。
+   * **重要：** 如果信息不足以判断，请明确指出信息缺乏。
 
-**5. 近三年财务数据概览与分析**
-   * 展示近三个完整年度的关键财务指标（营收、净利润、毛利率、净利率、ROE等，依赖知识库中年报/半年报讨论或LLM知识）。
-   * 对近三年财务表现进行简要归因分析。
+**5. 初步总结**
+   * 基于以上信息的汇总，给出一个简短、客观的总结陈述，说明当前观察到的公司状况、近期动态和潜在关注点。避免给出明确的买卖建议。
 
-**6. 近期积极变化与潜在催化剂**
-   * 公司近期（过去半年内）发生的积极变化（基于网络搜索信息）。
-   * 可能驱动股价上涨的潜在催化剂。
+--- 报告结束 ---
 
-**7. 行业趋势与公司增长逻辑**
-   * 公司所处行业的发展趋势、市场空间和竞争格局 (来自 StockList 的 industry 或 LLM 知识)。
-   * 支撑公司未来增长的核心逻辑。
-
-**8. 风险因素分析**
-   * 公司面临的主要经营风险、财务风险、市场风险、政策风险等 (基于知识库或网络信息)。
-
-**9. 股权激励与回购分析 (基于知识库信息)**
-   * 分析近期（如有）股权激励计划的关键条款及其可能影响。
-   * 分析近期（如有）股票回购计划的规模、价格区间及其信号意义。
-
-**10. 近期机构调研摘要 (基于知识库信息)**
-    * 总结近期（如有）机构调研活动中，公司管理层传递的关键信息或市场关注的焦点。
-
-**11. 估值分析**
-    * 结合历史数据和同业情况，进行 PE, PB 分析 (依赖LLM结合上下文)。
-    * 如有信息，可进行 PEG 分析或简要提及 DCF 思路。
-    * 给出当前估值水平的判断。
-
-**12. 近期市场表现与归因**
-    * 描述最近 5 个交易日股价的主要变动趋势 (此信息需外部获取，如下方所述)。
-    * 结合近期市场情绪、公司新闻或行业动态，简要分析股价变动的原因。
-
-**13. 近期产业积极因素**
-    * 提及近期（过去1-3个月）与公司所处产业相关的宏观、政策或技术方面的积极动态 (基于网络搜索信息)。
-
-**14. 总结与投资建议（可选）**
-    * 对公司的整体看法和潜在投资价值进行总结。
-
-**请基于上述信息和结构，生成报告内容。确保语言专业、客观。分析未知信息时，请说明信息来源或缺失。**
+请确保语言专业、客观、简洁，严格依据提供的信息。
 """
     return prompt
 
-# --- 主生成函数 (使用 get_stock_list_info, search_financial_news_google) ---
-def generate_stock_report(db: Session, symbol: str) -> str | None:
-    """
-    生成单只股票的分析报告。
-    """
-    logger.info(f"Starting report generation for symbol: {symbol}")
 
-    # 1. 获取股票名称 (从 StockList)
-    stock_info = get_stock_list_info(db, symbol) # 使用正确的函数
-    if not stock_info:
-        logger.error(f"Stock list info not found for symbol {symbol}. Cannot generate report.")
-        # 可以考虑让 LLM 在没有公司名称的情况下尝试生成，但信息会缺失
-        # return None
-        company_name = "该公司" # 使用占位符名称
-        logger.warning(f"Stock list info not found for {symbol}, using placeholder name.")
-    else:
-        company_name = stock_info.name
-        logger.info(f"Found stock: {symbol} - {company_name}")
+# --- Main Report Generation Function ---
+def generate_stock_report(db: Session, symbol: str) -> Optional[str]:
+    """
+    Orchestrates the process of gathering data, building the prompt,
+    calling the LLM, and returning the generated stock report.
+    """
+    logger.info(f"--- Starting Report Generation for: {symbol} ---")
 
-    # 2. 从知识库检索 (使用 raw_content, ann_date)
+    # 1. Get Basic Info (Name, Industry)
+    stock_info = get_stock_list_info(db, symbol)
+    company_name = stock_info.name if stock_info else f"股票代码 {symbol}"
+    industry = stock_info.industry if stock_info else "未知行业"
+    logger.info(f"Processing: {company_name} ({symbol}), Industry: {industry}")
+
+    # 2. Load Price and Financial Data
+    price_df = load_price_data(symbol, window=5) # Load last 5 days
+    # Load relevant financial reports (e.g., income statement and balance sheet)
+    financial_benefit = load_financial_data(symbol, report_type='benefit')
+    financial_balance = load_financial_data(symbol, report_type='balance')
+    # Format the loaded data for the prompt
+    price_context = format_price_data(price_df)
+    financial_context = format_financial_data(financial_benefit, '利润表') + format_financial_data(financial_balance, '资产负债表')
+
+    # 3. Retrieve from Knowledge Base (KB)
+    # Define queries relevant to the desired report sections
     kb_queries = {
-        "主业与核心产品": f"{company_name} 主营业务 核心产品",
-        "竞争力与技术": f"{company_name} 竞争优势 技术壁垒",
-        "财务分析": f"{company_name} 财务报告摘要",
-        "风险因素": f"{company_name} 风险因素",
-        "股权激励": f"{company_name} 股权激励计划",
-        "回购": f"{company_name} 回购股份",
-        "调研纪要": f"{company_name} 调研 纪要",
+        "业务与产品": f"{company_name} 主营业务 核心产品 最新进展",
+        "竞争力与风险": f"{company_name} 竞争优势 风险因素 护城河",
+        "财务与讨论": f"{company_name} 财务分析 管理层讨论",
+        "近期动态(公告)": f"{company_name} 股权激励 回购 调研 纪要 最新公告",
     }
     kb_context_parts = []
-    for section, query in kb_queries.items():
-        logger.info(f"Retrieving KB context for: {section}")
-        # 检索时使用 symbol
-        disclosures = retrieve_relevant_disclosures(db, symbol, query, top_k=2)
+    for query_desc, query_text in kb_queries.items():
+        logger.debug(f"Retrieving KB context for: {query_desc}")
+        # Retrieve top 2-3 relevant disclosures per query
+        disclosures = retrieve_relevant_disclosures(db, symbol, query_text, top_k=3)
         if disclosures:
-             # 格式化时使用 raw_content 和 ann_date
-            kb_context_parts.append(f"--- 关于【{section}】的知识库信息 ---\n{format_kb_results(disclosures)}")
+            # Format results for the prompt
+            kb_context_parts.append(format_kb_results(disclosures))
+        else:
+            logger.info(f"No KB results found for query: '{query_text[:50]}...'")
 
-    full_kb_context = "\n".join(kb_context_parts) if kb_context_parts else "本地知识库中未检索到与特定章节高度相关的历史公告信息。\n"
+    full_kb_context = "\n".join(kb_context_parts) if kb_context_parts else "本地知识库: 未检索到相关历史公告。\n"
 
-    # 3. 从网络搜索 (使用 Google CSE 函数)
-    logger.info("Retrieving recent web information using Google CSE...")
-    web_results = search_financial_news_google(symbol, company_name, num_results_per_site=2, total_general_results=3) # 调整数量
-    # 格式化时使用 snippet
+    # 4. Search Web for Recent News/Analysis
+    logger.info("Retrieving recent web information...")
+    web_results = search_financial_news_google(symbol, company_name, num_results_per_site=2, total_general_results=3)
     web_context = format_web_results(web_results)
 
-    # --- 待办: 获取最近5日股价变动 ---
-    # 这部分数据通常需要从另一个数据源获取 (如您项目中的 StockDaily 表或实时行情API)
-    # 这里暂时留空，让 LLM 基于已有信息推断或说明缺失
-    price_change_context = "最近5个交易日股价变动及归因：[此部分信息当前缺失，请基于其他上下文进行分析或说明]\n"
-    # 您可以在 main.py 中查询 StockDaily 表获取数据，然后传递给 generate_stock_report 函数
-    # 或者修改 generate_stock_report_prompt 将 price_change_context 作为参数传入
+    # 5. Build the Final Prompt
+    logger.debug("Building final prompt for LLM.")
+    final_prompt = generate_stock_report_prompt(
+        symbol=symbol,
+        company_name=company_name,
+        kb_context=full_kb_context,
+        web_context=web_context,
+        price_context=price_context,
+        financial_context=financial_context
+    )
+    # Log prompt length, maybe parts of it for debugging (be careful with sensitive info)
+    # logger.debug(f"Final Prompt (excerpt):\n{final_prompt[:500]}\n...\n{final_prompt[-500:]}")
 
-    # 4. 构建 Prompt
-    final_prompt = generate_stock_report_prompt(symbol, company_name, full_kb_context + "\n" + price_change_context, web_context)
 
-    # 5. 调用本地 LLM 生成报告
-    generated_report = call_local_llm(final_prompt, max_tokens=3500) # 增加 token 预留
+    # 6. Call Local LLM
+    logger.info("Calling local LLM to generate the report...")
+    generated_report = call_local_llm(final_prompt)
 
-    # 检查返回是否为错误信息
+    # 7. Validate and Return Report
     if generated_report.startswith("Error:"):
-        logger.error(f"Failed to generate report for {symbol} due to LLM error.")
-        return f"报告生成失败：{generated_report}" # 返回错误信息给调用者
-    elif not generated_report.strip():
-         logger.error(f"LLM returned empty response for {symbol}.")
-         return "报告生成失败：LLM 返回为空。"
-
-    logger.info(f"Successfully generated report for {symbol}")
-    return generated_report
-
-# 示例用法保持不变
+        logger.error(f"Report generation failed for {symbol}. LLM Error: {generated_report}")
+        return None # Return None on failure
+    elif not generated_report:
+         logger.error(f"Report generation failed for {symbol}. LLM returned empty string.")
+         return None
+    else:
+        logger.info(f"Successfully generated report for {symbol}.")
+        # Optionally add metadata to the report here if needed
+        report_header = f"**股票分析报告 ({time.strftime('%Y-%m-%d %H:%M:%S')})**\n**标的:** {company_name} ({symbol})\n\n"
+        return report_header + generated_report # Prepend a header

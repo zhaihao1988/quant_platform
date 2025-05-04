@@ -1,4 +1,4 @@
-# db/init_db.py
+# scripts/init_db.py
 from sqlalchemy import Column, Integer, String, Float, Date, JSON,Text,Vector
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker

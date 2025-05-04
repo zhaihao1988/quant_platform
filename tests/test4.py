@@ -132,7 +132,7 @@ if __name__ == "__main__":
         pdf_links = extract_pdf_links_enhanced(None, target_url, driver)
 
         # 创建结果文件
-        with open("result.txt", "w", encoding="utf-8") as f:
+        with open("../result.txt", "w", encoding="utf-8") as f:
             f.write("提取到的PDF链接：\n")
             for link in pdf_links:
                 f.write(f"{link}\n")

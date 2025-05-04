@@ -1,4 +1,4 @@
-# vector_store.py
+# utils/vector_store.py
 
 from sentence_transformers import SentenceTransformer
 
