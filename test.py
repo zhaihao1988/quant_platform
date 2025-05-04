@@ -7,7 +7,8 @@ import requests
 import re
 from datetime import datetime, timedelta
 from langchain_ollama import ChatOllama
-
+from langchain import hub
+react_prompt = hub.pull("hwchase17/react")
 
 # 动态获取最近一个交易日（排除节假日）
 def get_last_trading_day():
@@ -76,8 +77,7 @@ tools = [
 ]
 
 # 提示模板（新增数据校验要求）
-prompt_template = """
-你是一名资深金融分析师，请按以下步骤分析：
+prompt_template = """你是一名资深金融分析师，请按以下步骤分析：
 
 当前时间：{current_time}
 用户问题：{input}
@@ -85,21 +85,22 @@ prompt_template = """
 可用工具：
 {tools}
 
+工具名称列表：{tool_names}
+
 关键数据要求：
 1. 股票代码必须为000887.SZ
 2. 仅使用{date_str}的收盘价数据
 3. 总股本需来自最新公告（当前应为13.16亿股）
 
 分析步骤：
-...（原有步骤保持不变）...
+{agent_scratchpad}  # 必须包含此占位符
 
 最终答案：必须按以下JSON格式输出：
 {{
   "市值": "数值+单位",
   "合理性分析": ["要点1", "要点2"],
   "投资建议": "建议内容"
-}}
-"""
+}}"""
 
 agent_executor = AgentExecutor(
     agent=create_react_agent(llm, tools, PromptTemplate.from_template(prompt_template)),
