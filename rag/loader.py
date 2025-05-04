@@ -1,12 +1,16 @@
 # rag/loader.py
-
+import re
+from sqlalchemy.orm import Session
+from db.models import  StockDisclosure
 import pandas as pd
 from sqlalchemy import text
 from db.database import get_engine, get_session
 from utils.scraper import fetch_announcement_text
 from rag.retriever import add_documents
-engine = get_engine()
+from utils.vector_store import embed_text
 
+engine = get_engine()
+KEYWORDS = ['年度报告', '半年度报告', '调研', '股权激励', '回购']
 def load_price_data(symbol: str, window: int = 90) -> pd.DataFrame:
     """加载最近 window 天的日线数据"""
     sql = text("""
@@ -31,23 +35,19 @@ def load_financial_data(symbol: str, report_type: str = "benefit") -> dict:
     df = pd.read_sql(sql, engine, params={"symbol": symbol, "rtype": report_type})
     return df["data"].iloc[0] if not df.empty else {}
 
-def load_announcements(symbol: str, top_n: int = 3) -> list[str]:
-    """加载最近 top_n 条公告链接并抓取正文"""
-    sql = text("""
-      SELECT url
-      FROM stock_disclosure
-      WHERE symbol = :symbol
-      ORDER BY ann_date DESC
-      LIMIT :limit
-    """)
-    df = pd.read_sql(sql, engine, params={"symbol": symbol, "limit": top_n})
-    texts = []
-    for url in df["url"]:
-        text = fetch_announcement_text(url)
-        if text:
-            snippet = text[:10000]  # 截取前10000字符
-            texts.append(snippet)
-    # 立即添加到向量库，持久化
-    if texts:
-        add_documents(symbol, texts)
-    return texts
+def load_announcements(db_session, symbol: str):
+    items = (
+        db_session.query(StockDisclosure)
+        .filter(StockDisclosure.symbol == symbol)
+        .filter(StockDisclosure.raw_content.is_(None))
+        .all()
+    )
+    for ann in items:
+        text = fetch_announcement_text(ann.url, ann.title)
+        if not text:
+            continue
+        ann.raw_content = text
+        vec = embed_text(text)  # 返回 length-768 的 list[float]
+        ann.content_vector = vec
+        db_session.add(ann)
+    db_session.commit()

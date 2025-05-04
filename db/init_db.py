@@ -1,5 +1,5 @@
 # db/init_db.py
-from sqlalchemy import Column, Integer, String, Float, Date, JSON
+from sqlalchemy import Column, Integer, String, Float, Date, JSON,Text,Vector
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -29,6 +29,8 @@ class StockDisclosure(Base):
     title = Column(String(500), nullable=False)                   # 公告标题
     ann_date = Column(Date, nullable=False, index=True)           # 公告日期
     url = Column(String(500), nullable=False)                     # 公告链接
+    raw_content = Column(Text, nullable=True)  # 公告内容
+    content_vector = Column(Vector(768), nullable=True)
 class StockList(Base):
     __tablename__ = "stock_list"
     id = Column(Integer, primary_key=True, autoincrement=True)

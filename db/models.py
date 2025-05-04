@@ -1,6 +1,6 @@
 # db/models.py
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, Integer, String, Float, Date
+from sqlalchemy import Column, Integer, String, Float, Date,Text,Vector
 
 Base = declarative_base()
 
@@ -51,3 +51,5 @@ class StockDisclosure(Base):
     title = Column(String(500), nullable=False)                   # 公告标题
     ann_date = Column(Date, nullable=False, index=True)           # 公告日期
     url = Column(String(500), nullable=False)                     # 公告链接
+    raw_content = Column(Text, nullable=True)                         # 公告内容
+    content_vector = Column(Vector(768), nullable=True)
