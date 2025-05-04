@@ -4,10 +4,9 @@
 
 import akshare as ak
 import pandas as pd
-from datetime import datetime
 from sqlalchemy.orm import sessionmaker
 from db.database import get_engine
-from db.init_db import Base, StockFinancial
+from scripts.init_db import Base, StockFinancial
 
 # 数据库引擎和会话
 engine = get_engine()

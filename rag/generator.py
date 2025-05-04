@@ -8,10 +8,10 @@ from langchain.chains import LLMChain  # 用于链式调用 LLMChain :contentRef
 from langchain.llms import Ollama  # 本地 Ollama 接口 :contentReference[oaicite:1]{index=1}
 
 from config.settings import settings  # 全局配置，包括模型名、邮件等
-from rag.loader import load_price_data, load_financial_data, load_announcements  # 数据加载模块
+from data_processing.loader import load_price_data, load_financial_data, load_announcements  # 数据加载模块
 from rag.retriever import retrieve_context  # 向量检索模块（Chroma） :contentReference[oaicite:2]{index=2}
-from rag.prompting import deep_template  # 自定义深度分析 PromptTemplate
-from rag.news import search_stock_news
+from core.prompting import deep_template  # 自定义深度分析 PromptTemplate
+from integrations.web_search import search_stock_news
 def summarize_price(df: pd.DataFrame) -> str:
     """
     将交易 DataFrame 汇总为文本，包括最近 5 日平均收盘价、最高、最低等信息。

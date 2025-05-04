@@ -1,0 +1,37 @@
+# requirements.txt
+
+# --- 数据库 ---
+sqlalchemy
+psycopg2-binary   # For PostgreSQL connection
+pgvector          # pgvector client for SQLAlchemy
+
+# --- 数据处理与爬虫 ---
+requests          # HTTP requests
+pypdf             # PDF text extraction (replaces PyPDF2)
+beautifulsoup4    # HTML parsing (for finding PDF links etc.)
+lxml              # Faster HTML parser for BeautifulSoup (optional but recommended)
+
+# --- 向量嵌入 ---
+sentence-transformers
+torch             # Backend for sentence-transformers (or tensorflow, jax)
+
+# --- LLM 与 RAG ---
+ollama            # Client for Ollama LLM server
+# langchain       # (可选) 强大的 RAG 框架，包含 text splitters, vector store integrations, prompt templates etc.
+# langchain-community # (可选) LangChain community integrations
+# langchain-postgres # (可选) LangChain specific pgvector integration
+
+# --- Web 搜索 ---
+# duckduckgo-search # 如果你选择使用 DuckDuckGo 作为备选或补充
+google-api-python-client # 推荐用于更健壮的 Google API 交互 (当前代码使用 requests)
+
+# --- 配置管理 ---
+python-dotenv     # Load .env files
+pydantic-settings # Settings management
+
+# --- (可选) Web 框架与服务器 (如果未来需要 API) ---
+# fastapi
+# uvicorn[standard]
+
+# --- (可选) 数据库迁移 ---
+# alembic

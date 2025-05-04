@@ -1,12 +1,9 @@
 # rag/loader.py
-import re
-from sqlalchemy.orm import Session
 from db.models import  StockDisclosure
 import pandas as pd
 from sqlalchemy import text
-from db.database import get_engine, get_session
-from utils.scraper import fetch_announcement_text
-from rag.retriever import add_documents
+from db.database import get_engine
+from data_processing.scraper import fetch_announcement_text
 from utils.vector_store import embed_text
 
 engine = get_engine()
