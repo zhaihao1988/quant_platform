@@ -1,6 +1,6 @@
 # utils/data_loader.py
 import pandas as pd
-from db.database import get_engine
+from db.database import get_engine_instance
 
 def load_daily_data(symbol: str, start_date: str, end_date: str, fields=None) -> pd.DataFrame:
     """
@@ -10,7 +10,7 @@ def load_daily_data(symbol: str, start_date: str, end_date: str, fields=None) ->
     :param end_date: 结束日期 '2023-12-31'
     :param fields: 需要的字段列表，默认全字段
     """
-    engine = get_engine()
+    engine = get_engine_instance()
     if not fields:
         fields = "*"
     else:

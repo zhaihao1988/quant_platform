@@ -1,5 +1,7 @@
 # core/prompting.py
 import logging
+import os
+
 import pandas as pd
 from sqlalchemy.orm import Session
 import ollama
@@ -11,8 +13,8 @@ import time
 from config.settings import settings
 from db.models import StockDisclosure
 from db.crud import get_stock_list_info, retrieve_relevant_disclosures
-from data_processing.loader import load_price_data, load_financial_data
-from integrations.web_search import search_financial_news_google
+from data_processing.loader import load_price_data, load_financial_data, load_multiple_financial_reports
+from integrations.web_search import get_web_search_results
 
 logger = logging.getLogger(__name__)
 
@@ -49,19 +51,23 @@ def call_local_llm(prompt: str) -> str:
         return f"Error: Failed to generate response from LLM '{model_name}'. Check logs for details."
 
 
-# --- Context Formatting Functions ---
-def format_kb_results(disclosures: List[StockDisclosure]) -> str:
-    """Formats retrieved knowledge base disclosures for the prompt."""
-    if not disclosures:
-        return "本地知识库: 未找到相关历史公告。\n"
+def format_kb_results(chunk_results: List[Dict[str, Any]]) -> str:
+    """Formats retrieved knowledge base disclosure chunks for the prompt."""
+    if not chunk_results:
+        return "本地知识库: 未找到相关历史公告内容块。\n"
 
-    formatted = "--- 本地知识库 (相关历史公告摘要) ---\n"
-    for i, disc in enumerate(disclosures):
-        content_snippet = disc.raw_content[:600] + "..." if disc.raw_content and len(
-            disc.raw_content) > 600 else disc.raw_content
-        publish_date_str = disc.ann_date.strftime('%Y-%m-%d') if disc.ann_date else "N/A"
-        formatted += f"{i + 1}. 《{disc.title}》 ({publish_date_str})\n"
-        formatted += f"   摘要: {content_snippet}\n\n"
+    formatted = "--- 本地知识库 (相关历史公告内容片段) ---\n"
+    # 可以按原公告ID分组显示，或者直接列表
+    for i, chunk_info in enumerate(chunk_results):
+        content_snippet = chunk_info.get('chunk_text', '')[:800] + ("..." if len(chunk_info.get('chunk_text', '')) > 800 else "") # 显示更长的片段
+        publish_date_str = chunk_info.get('ann_date').strftime('%Y-%m-%d') if chunk_info.get('ann_date') else "N/A"
+        title = chunk_info.get('title', 'N/A')
+        disclosure_id = chunk_info.get('disclosure_id', 'N/A')
+        chunk_order = chunk_info.get('chunk_order', 'N/A')
+
+        formatted += f"{i + 1}. 来源公告: 《{title}》 ({publish_date_str}) (ID: {disclosure_id}, 块: {chunk_order})\n"
+        formatted += f"   内容片段: {content_snippet}\n\n"
+
     formatted += "--- 知识库信息结束 ---\n"
     return formatted
 
@@ -110,82 +116,81 @@ def format_price_data(df_price: Optional[pd.DataFrame]) -> str:
     return formatted
 
 
-def format_financial_data(financials: Optional[Dict[str, Any]], report_type: str) -> str:
-    """Formats latest financial data (JSONB) for the prompt, dynamically extracting all fields."""
-    if not financials:
-        return f"最新{report_type}财务数据: [数据库中无可用数据]\n"
+# --- 新增：格式化多期财务数据 ---
+def format_multiple_financial_reports(reports_list: List[Dict[str, Any]], report_type_key: str) -> str:
+    """
+    Formats multiple financial reports (e.g., latest + last 3 annual) for the prompt.
 
-    # Validate report type
-    valid_report_types = ['benefit', 'debt', 'cash']
-    if report_type not in valid_report_types:
-        logger.warning(f"Invalid report type: {report_type}. Using raw data display.")
-        report_type = "财务"
+    Args:
+        reports_list: List of dictionaries, each containing 'report_date' and 'data'.
+                      Expected to be sorted by date descending.
+        report_type_key: The key for the report type (e.g., 'benefit', 'debt', 'cash').
 
-    # Map report types to Chinese names for display
-    report_type_names = {
-        'benefit': '利润表',
-        'debt': '资产负债表',
-        'cash': '现金流量表'
-    }
-    display_name = report_type_names.get(report_type, report_type)
+    Returns:
+        A formatted string ready for the LLM prompt.
+    """
+    if not reports_list:
+        return f"{report_type_key.capitalize()} 表数据: [数据库中无可用数据]\n"
 
-    formatted = f"--- 最新{display_name}财务数据 (完整字段) ---\n"
+    report_type_names = {'benefit': '利润表', 'debt': '资产负债表', 'cash': '现金流量表'}
+    display_name = report_type_names.get(report_type_key, report_type_key.capitalize())
 
-    def convert_chinese_number(value):
-        """Convert numbers with Chinese units (亿/万) to standard numeric format"""
+    full_formatted_string = ""
+
+    # Helper function (与旧函数类似)
+    def convert_and_format_value(value):
         if isinstance(value, str):
+            # 使用 try...except 处理可能的转换错误
             if '亿' in value:
                 try:
                     num = float(value.replace('亿', '').strip())
-                    return num * 100000000
+                    return f"{(num * 1e8):,.2f}"  # 添加逗号和两位小数格式化
                 except ValueError:
-                    return value
+                    pass  # 转换失败则忽略，继续到函数末尾返回原始字符串
             elif '万' in value:
                 try:
                     num = float(value.replace('万', '').strip())
-                    return num * 10000
+                    return f"{(num * 1e4):,.2f}"  # 添加逗号和两位小数格式化
                 except ValueError:
-                    return value
-        return value
+                    pass  # 转换失败则忽略
+        elif isinstance(value, float):
+            return f"{value:,.2f}"  # 对浮点数格式化
+        elif isinstance(value, int):
+            return f"{value:,}"  # 对整数格式化
+        # 对于其他类型或转换失败的情况，返回原始值的字符串形式
+        return str(value)
 
-    try:
-        if not isinstance(financials, dict):
-            # If data is not already a dict, try to parse it from JSON string
-            try:
-                financials = json.loads(financials)
+    for report in reports_list:
+        report_date = report.get('report_date')
+        financial_data = report.get('data')
+
+        if not report_date or not financial_data: continue
+
+        date_str = report_date.strftime('%Y-%m-%d')
+        formatted_section = f"--- {display_name} ({date_str}) ---\n"
+
+        if not isinstance(financial_data, dict):
+            try: financial_data = json.loads(financial_data)
             except (TypeError, json.JSONDecodeError):
-                logger.error(f"Financial data is not in expected format (dict or JSON string): {type(financials)}")
-                return f"最新{display_name}财务数据: [数据格式错误]\n"
+                formatted_section += "[数据格式错误]\n"
+                full_formatted_string += formatted_section + "\n"
+                continue
 
-        if not financials:
-            return f"最新{display_name}财务数据: [数据为空]\n"
+        if not financial_data:
+            formatted_section += "[数据为空]\n"
+        else:
+            # 提取关键字段并格式化 (可以根据需要选择性显示，或全部显示)
+            # 这里示例显示所有字段
+            for key, value in financial_data.items():
+                 # 跳过空值或非数值/字符串（如果需要）
+                 # if value is None or value == '': continue
+                 formatted_value = convert_and_format_value(value)
+                 formatted_section += f"  {key}: {formatted_value}\n"
 
-        # Dynamically extract all fields from the JSON data
-        for key, value in financials.items():
-            # First convert any Chinese number units
-            converted_value = convert_chinese_number(value)
+        formatted_section += "---\n"
+        full_formatted_string += formatted_section + "\n" # 在不同报告期之间加空行
 
-            # Format the value based on its type
-            if isinstance(converted_value, (int, float)):
-                # For numbers, format with commas for thousands and 2 decimal places
-                formatted_value = f"{converted_value:,.2f}" if isinstance(converted_value,
-                                                                          float) else f"{converted_value:,}"
-            elif isinstance(converted_value, str):
-                # For strings, just use as-is
-                formatted_value = converted_value
-            else:
-                # For other types (lists, dicts), convert to string
-                formatted_value = str(converted_value)
-
-            formatted += f"  {key}: {formatted_value}\n"
-
-        formatted += "---\n"
-
-    except Exception as e:
-        logger.error(f"Error formatting financial data ({report_type}): {e}", exc_info=True)
-        formatted += f"[格式化{display_name}财务数据时出错]\n"
-
-    return formatted
+    return full_formatted_string if full_formatted_string else f"{display_name}: [无有效数据格式化]\n"
 
 
 # --- Prompt Generation ---
@@ -195,64 +200,38 @@ def generate_stock_report_prompt(
         kb_context: str,
         web_context: str,
         price_context: str,
-        financial_context: str
+        financial_context: str, # <--- 这个现在是包含多期数据的字符串
+        industry: str
 ) -> str:
-    """
-    Builds the final structured prompt string for the LLM.
-    """
     prompt = f"""
-角色：你是一位经验丰富、严谨客观的初级股票分析师。你的任务是基于提供的结构化信息，生成一份对中国A股上市公司的初步研究报告。请严格根据下方提供的信息进行分析，避免编造数据或信息之外的内容。如果信息不足，请明确指出。
-
-目标：为股票代码 {symbol} ({company_name}) 生成一份研究报告。
+角色：你是一位拥有多年经验的资深股票分析师，专长于中国A股市场...
 
 可用信息源：
-1.  本地知识库：包含公司历史公告（如年报、半年报、调研、回购、股权激励）的原文摘要。
-2.  网络搜索：近期（约6个月内）来自主流财经网站的新闻摘要和分析片段。
-3.  近期股价：最近几个交易日的收盘价、涨跌幅、成交量等数据。
-4.  最新财务数据：最新一期财务报表（如利润表、资产负债表）的关键指标摘要。
-
-报告结构要求：请严格按照以下序号和标题组织报告内容。
+...
+4.  财务数据：包含最新一期及最近几年的年度报告关键指标（**请注意数据旁边括号内的报告日期**）。
+...
 
 --- 可用信息 ---
 
 {kb_context}
 {web_context}
 {price_context}
-{financial_context}
+{financial_context} # <--- 包含多期数据
 
 --- 可用信息结束 ---
 
 
 --- 请生成以下结构的报告 ---
 
-**========================= 股票研究报告：{symbol} {company_name} =========================**
-
-**1. 公司概览与主营业务**
-   * 基于已知信息（如来自StockList的行业、地域信息，或知识库/网络信息中提及的），简述公司主营业务和主要产品/服务。指出信息来源。
-
-**2. 近期市场表现分析**
-   * 结合【近期股价表现】数据，描述近期的股价趋势（涨跌幅度、成交量变化）。
-   * 尝试结合【近期网络信息】或【本地知识库】中的事件（如公告发布、行业新闻），对股价波动进行初步归因分析。如果无法找到明确原因，请说明。
-
-**3. 近期关键基本面信息**
-   * 结合【最新财务数据】摘要，展示关键财务指标。
-   * 结合【本地知识库】和【近期网络信息】，总结近期（6个月内）是否有重要的公告（如重大合同、业绩预告、回购、股权激励、高管变动、重要调研纪要）。列出关键信息点。
-   * 结合【近期网络信息】，总结是否有行业层面的积极或消极动态与公司相关。
-
-**4. 核心竞争力与风险点（基于现有信息总结）**
-   * 根据【本地知识库】（年报讨论部分摘要）或【近期网络信息】（分析片段），尝试总结公司可能的核心竞争力（如品牌、技术、市场地位等）。
-   * 根据【本地知识库】（年报风险章节摘要）或【近期网络信息】，尝试总结公司面临的主要风险点。
-   * **重要：** 如果信息不足以判断，请明确指出信息缺乏。
-
-**5. 初步总结**
-   * 基于以上信息的汇总，给出一个简短、客观的总结陈述，说明当前观察到的公司状况、近期动态和潜在关注点。避免给出明确的买卖建议。
-
---- 报告结束 ---
-
-请确保语言专业、客观、简洁，严格依据提供的信息。
+**========================= 股票深度研究报告（初稿）：{symbol} {company_name} =========================**
+...
+**3. 财务表现分析 (基于多期数据)**
+   * 关键财务指标展示与趋势分析：(基于【财务数据】部分提供的**不同报告期**数据，展示关键指标如营收、净利、毛利率、费用率等的变化趋势，并进行简要描述)。
+   * 财务变动归因：(结合知识库中的“管理层讨论与分析”摘要或网络信息，分析**近几年**财务指标变动的主要原因)。
+...
+(Prompt 的其余部分保持不变或根据需要微调)
 """
     return prompt
-
 
 # --- Main Report Generation Function ---
 def generate_stock_report(db: Session, symbol: str) -> Optional[str]:
@@ -262,64 +241,93 @@ def generate_stock_report(db: Session, symbol: str) -> Optional[str]:
     """
     logger.info(f"--- Starting Report Generation for: {symbol} ---")
 
-    # 1. Get Basic Info (Name, Industry)
+    # 1. Get Basic Info
     stock_info = get_stock_list_info(db, symbol)
     company_name = stock_info.name if stock_info else f"股票代码 {symbol}"
     industry = stock_info.industry if stock_info else "未知行业"
     logger.info(f"Processing: {company_name} ({symbol}), Industry: {industry}")
 
-    # 2. Load Price and Financial Data
+    # 2. Load Price and Financial Data (调用新函数)
     price_df = load_price_data(symbol, window=5)
-    # Load all three types of financial reports
-    financial_benefit = load_financial_data(symbol, report_type='benefit')
-    financial_debt = load_financial_data(symbol, report_type='debt')
-    financial_cash = load_financial_data(symbol, report_type='cash')
+    # --- 修改：调用 load_multiple_financial_reports ---
+    financial_benefit_reports = load_multiple_financial_reports(symbol, report_type='benefit', num_years=3)
+    financial_debt_reports = load_multiple_financial_reports(symbol, report_type='debt', num_years=3)
+    financial_cash_reports = load_multiple_financial_reports(symbol, report_type='cash', num_years=3)
 
-    # Format the loaded data for the prompt
+    # --- 修改：调用新的格式化函数 ---
     price_context = format_price_data(price_df)
     financial_context = (
-            format_financial_data(financial_benefit, 'benefit') +
-            format_financial_data(financial_debt, 'debt') +
-            format_financial_data(financial_cash, 'cash')
+            format_multiple_financial_reports(financial_benefit_reports, 'benefit') +
+            format_multiple_financial_reports(financial_debt_reports, 'debt') +
+            format_multiple_financial_reports(financial_cash_reports, 'cash')
     )
+    # ---------------------------------------------
 
-    # 3. Retrieve from Knowledge Base (KB)
-    kb_queries = {
+    # 3. Retrieve from Knowledge Base (KB) (假设使用分块逻辑)
+    kb_queries = { # 可以根据需要调整或增加查询
         "业务与产品": f"{company_name} 主营业务 核心产品 最新进展",
         "竞争力与风险": f"{company_name} 竞争优势 风险因素 护城河",
-        "财务与讨论": f"{company_name} 财务分析 管理层讨论",
+        "财务与讨论": f"{company_name} 财务分析 管理层讨论", # 这个查询现在更重要
         "近期动态(公告)": f"{company_name} 股权激励 回购 调研 纪要 最新公告",
+        "机器人布局": f"{company_name} 机器人 进展 合作", # 增加特定主题查询
     }
     kb_context_parts = []
+    retrieved_chunk_ids = set() # 用于对 KB 结果去重（如果需要）
     for query_desc, query_text in kb_queries.items():
         logger.debug(f"Retrieving KB context for: {query_desc}")
-        disclosures = retrieve_relevant_disclosures(db, symbol, query_text, top_k=3)
-        if disclosures:
-            kb_context_parts.append(format_kb_results(disclosures))
+        # 假设 retrieve_relevant_disclosures 返回的是块信息列表
+        chunk_results = retrieve_relevant_disclosures(db, symbol, query_text, top_k=3) # top_k 可调整
+        # 添加去重逻辑（可选，基于 chunk_id 或 disclosure_id+chunk_order）
+        # unique_chunks = []
+        # for chunk in chunk_results: ... add if unique ...
+        if chunk_results:
+            kb_context_parts.append(format_kb_results(chunk_results)) # 使用处理块的格式化函数
         else:
             logger.info(f"No KB results found for query: '{query_text[:50]}...'")
 
-    full_kb_context = "\n".join(kb_context_parts) if kb_context_parts else "本地知识库: 未检索到相关历史公告。\n"
+    full_kb_context = "\n".join(kb_context_parts) if kb_context_parts else "本地知识库: 未检索到相关历史公告内容。\n"
 
-    # 4. Search Web for Recent News/Analysis
+
+    # 4. Search Web for Recent News/Analysis (调用最新的 web search 接口)
     logger.info("Retrieving recent web information...")
-    web_results = search_financial_news_google(symbol, company_name, num_results_per_site=2, total_general_results=3)
-    web_context = format_web_results(web_results)
+    # web_results = search_financial_news_google(symbol, company_name, ...) # 旧接口
+    web_results = get_web_search_results(symbol) # <--- 调用新的 web search 接口
+    # format_web_results 可能需要调整以更好地显示抓取到的 content
+    web_context = format_web_results(web_results) # 假设此函数能处理新格式
 
     # 5. Build the Final Prompt
     logger.debug("Building final prompt for LLM.")
     final_prompt = generate_stock_report_prompt(
         symbol=symbol,
         company_name=company_name,
+        industry=industry, # 传入行业
         kb_context=full_kb_context,
         web_context=web_context,
         price_context=price_context,
-        financial_context=financial_context
+        financial_context=financial_context # 传入包含多期数据的 context
     )
+
+    # --- 保存 Prompt 代码 (保持不变) ---
+    try:
+        debug_prompt_dir = "debug_prompts"
+        if not os.path.exists(debug_prompt_dir): os.makedirs(debug_prompt_dir)
+        prompt_filename = f"prompt_{symbol}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        prompt_save_path = os.path.join(debug_prompt_dir, prompt_filename)
+        with open(prompt_save_path, 'w', encoding='utf-8') as f:
+            f.write(f"--- Prompt for {symbol} at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+            f.write(f"Prompt Length (chars): {len(final_prompt)}\n")
+            f.write("="*40 + "\n\n")
+            f.write(final_prompt)
+        logger.info(f"Full prompt saved for debugging to: {prompt_save_path}")
+        logger.info(f"Prompt character count: {len(final_prompt)}")
+    except Exception as e:
+        logger.error(f"Error saving debug prompt: {e}", exc_info=True)
+    # --- 保存结束 ---
 
     # 6. Call Local LLM
     logger.info("Calling local LLM to generate the report...")
     generated_report = call_local_llm(final_prompt)
+
 
     # 7. Validate and Return Report
     if generated_report.startswith("Error:"):

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 # --- Project Modules ---
 from db.database import get_db_session, create_database_tables # Use context manager for session
-from db import crud # Import crud module
+from db import crud, models  # Import crud module
 from data_processing import loader, scraper # Import loader and scraper
 from core import vectorizer, prompting # Import vectorizer and prompting
 from integrations import email_sender
@@ -47,53 +47,99 @@ def run_data_processing(db: Session, symbol: str):
         return
 
     logger.info(f"Found {len(disclosures_to_process)} disclosures to process for {symbol}.")
-
-    for disclosure in disclosures_to_process:
-        logger.info(f"Processing Disclosure ID: {disclosure.id}, Title: {disclosure.title[:50]}...")
+    for disclosure_meta in disclosures_to_process:  # 使用不同的变量名避免覆盖
+        logger.info(f"Processing Disclosure ID: {disclosure_meta.id}, Title: {disclosure_meta.title[:50]}...")
         text_content = None
-        embedding_vector = None
         try:
-            # 2. Scrape text content
-            text_content = scraper.fetch_announcement_text(disclosure.url, disclosure.title)
-            if not text_content:
-                logger.warning(f"Failed to fetch/extract text for Disclosure ID: {disclosure.id}. Skipping.")
+            # 1. Scrape text content (如果公告已存在，只爬内容)
+            disclosure_in_db = db.query(models.StockDisclosure).filter(
+                models.StockDisclosure.id == disclosure_meta.id).first()
+            if not disclosure_in_db:
+                # 这里理论上应该已经在 sync_disclosure_data.py 中创建了记录
+                # 如果担心遗漏，可以在这里创建一个基础记录，但不推荐
+                logger.error(f"Disclosure metadata with ID {disclosure_meta.id} not found in DB during processing!")
                 failed_count += 1
-                continue # Skip to next disclosure if scraping fails
+                continue
 
-            logger.info(f"Successfully scraped text (length: {len(text_content)}) for Disclosure ID: {disclosure.id}")
-
-            # 3. Generate embedding
-            embedding_vector = vectorizer.get_embedding(text_content, is_query=False)
-            if not embedding_vector:
-                logger.warning(f"Failed to generate embedding for Disclosure ID: {disclosure.id}. Vector will be NULL.")
-                # Still save the text content even if embedding fails
+            # 只有当 raw_content 为空时才爬取
+            if disclosure_in_db.raw_content is None:
+                text_content = scraper.fetch_announcement_text(disclosure_meta.url, disclosure_meta.title)
+                if not text_content:
+                    logger.warning(f"Failed to fetch text for Disclosure ID: {disclosure_meta.id}. Skipping.")
+                    failed_count += 1
+                    continue
+                logger.info(
+                    f"Successfully scraped text (length: {len(text_content)}) for Disclosure ID: {disclosure_meta.id}")
+                # 更新数据库中的 raw_content
+                disclosure_in_db.raw_content = text_content
+                db.add(disclosure_in_db)
+                # 注意：这里可以先 commit 一次，确保 raw_content 保存成功
+                # db.commit() # 或者在循环外统一 commit
             else:
-                logger.info(f"Successfully generated embedding vector for Disclosure ID: {disclosure.id}")
+                logger.info(
+                    f"Raw content already exists for Disclosure ID: {disclosure_meta.id}. Using existing content.")
+                text_content = disclosure_in_db.raw_content  # 使用数据库中已有的内容
 
-            # 4. Update database (commit handled by context manager later)
-            # We pass data to crud, crud updates the object in the session
-            update_successful = crud.update_disclosure_content_vector(
-                db=db, # Pass the session
-                disclosure_id=disclosure.id,
-                text_content=text_content,
-                vector=embedding_vector
-            )
-            if update_successful:
-                 processed_count += 1
-            else:
-                 failed_count += 1
-                 # Error already logged in crud function
+            # --- 新增：检查是否已处理过分块 ---
+            existing_chunks = db.query(models.StockDisclosureChunk).filter(
+                models.StockDisclosureChunk.disclosure_id == disclosure_meta.id).count()
+            if existing_chunks > 0:
+                logger.info(
+                    f"Chunks already exist for Disclosure ID: {disclosure_meta.id}. Skipping chunking and embedding.")
+                processed_count += 1  # 视为已处理
+                continue
+            # --- 检查结束 ---
 
-            # Optional: Add a small delay between processing each disclosure
-            time.sleep(random.uniform(1, 3))
+            # 2. Split text into chunks
+            logger.info(f"Splitting text for Disclosure ID: {disclosure_meta.id}...")
+            # --- 调用分块函数 ---
+            chunks = vectorizer.split_text_into_chunks(text_content, chunk_size=450,
+                                                       chunk_overlap=50)  # 使用 vectorizer.py 中的参数
+
+            if not chunks:
+                logger.warning(f"Splitting resulted in no chunks for Disclosure ID: {disclosure_meta.id}")
+                failed_count += 1
+                continue
+
+            # 3. Embed and save each chunk
+            logger.info(f"Embedding {len(chunks)} chunks for Disclosure ID: {disclosure_meta.id}...")
+            for i, chunk_text in enumerate(chunks):
+                embedding_vector = vectorizer.get_embedding(chunk_text, is_query=False)  # is_query=False 表示是文档块
+                if embedding_vector:
+                    # 4. Save chunk and vector to DB (需要新的 CRUD 函数)
+                    save_successful = crud.save_disclosure_chunk(  # <--- 调用新的 CRUD 函数
+                        db=db,
+                        disclosure_id=disclosure_meta.id,
+                        chunk_order=i,
+                        chunk_text=chunk_text,
+                        vector=embedding_vector
+                    )
+                    if not save_successful:
+                        logger.error(f"Failed to save chunk {i} for Disclosure ID: {disclosure_meta.id}")
+                        # 可以选择在这里停止处理该公告的其他块，或者继续
+                else:
+                    logger.warning(
+                        f"Failed to generate embedding for chunk {i}, Disclosure ID: {disclosure_meta.id}. Skipping this chunk.")
+
+            processed_count += 1  # 标记整个公告处理完成（即使部分块失败）
+
+            # Optional: Add a small delay
+            time.sleep(random.uniform(0.5, 1.5))  # 减少延时，因为主要耗时在 embedding
 
         except Exception as e:
-            logger.error(f"Unhandled error processing Disclosure ID {disclosure.id}: {e}", exc_info=True)
+            logger.error(f"Unhandled error processing Disclosure ID {disclosure_meta.id}: {e}", exc_info=True)
             failed_count += 1
-            # Continue to the next disclosure even if one fails unexpectedly
+            db.rollback()  # 出错时回滚当前公告的处理
 
-    logger.info(f"--- Finished Data Processing for {symbol}. Processed: {processed_count}, Failed: {failed_count} ---")
-
+    logger.info(
+        f"--- Finished Data Processing for {symbol}. Processed disclosures: {processed_count}, Failed: {failed_count} ---")
+    # 循环结束后统一提交事务
+    try:
+        db.commit()
+        logger.info("Committed changes for data processing.")
+    except Exception as e:
+        logger.error(f"Failed to commit changes after data processing: {e}", exc_info=True)
+        db.rollback()
 
 # --- Main Execution Logic ---
 def main():

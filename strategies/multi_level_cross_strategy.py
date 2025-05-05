@@ -107,13 +107,13 @@ class MultiLevelCrossStrategy(BaseStrategy):
 
 # 调试测试
 if __name__ == "__main__":
-    from db.database import get_engine
+    from db.database import get_engine_instance
     from sqlalchemy import text
 
     strategy = MultiLevelCrossStrategy()
 
     # 1. 获取股票列表
-    engine = get_engine()
+    engine = get_engine_instance()
     stock_query = "SELECT DISTINCT symbol FROM stock_daily"
     df_stocks = pd.read_sql(stock_query, con=engine)
     stock_list = df_stocks['symbol'].tolist()

@@ -1,7 +1,9 @@
 # database/models.py
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, Integer, String, Float, Date, Text, JSON # Added JSON for financial data
+from sqlalchemy import Column, Integer, String, Float, Date, Text, JSON, ForeignKey  # Added JSON for financial data
 from pgvector.sqlalchemy import Vector
+from sqlalchemy.orm import relationship
+
 from config.settings import settings # Import settings to get dimension
 
 Base = declarative_base()
@@ -49,7 +51,20 @@ class StockFinancial(Base):
     report_type = Column(String, index=True) # e.g., "benefit", "balance", "cashflow"
     report_date = Column(Date, index=True)
     data = Column(JSON) # Assuming financial data stored as JSON
+class StockDisclosureChunk(Base):
+    __tablename__ = "stock_disclosure_chunk"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    disclosure_id = Column(Integer, ForeignKey('stock_disclosure.id'), nullable=False, index=True) # 关联回原公告
+    chunk_order = Column(Integer, nullable=False) # 块的顺序
+    chunk_text = Column(Text, nullable=False) # 块文本
+    chunk_vector = Column(Vector(settings.EMBEDDING_DIM), nullable=True) # 块向量
 
+    disclosure = relationship("StockDisclosure") # 可选，方便查询
+
+    # 创建向量索引 (需要手动或通过 alembic 在数据库中执行)
+    # __table_args__ = (
+    #     Index('idx_chunk_vector', chunk_vector, postgresql_using='hnsw', postgresql_with={'m': 16, 'ef_construction': 64}),
+    # )
 class StockDisclosure(Base):
     """A股上市公司公告表"""
     __tablename__ = "stock_disclosure"
@@ -61,4 +76,4 @@ class StockDisclosure(Base):
     url = Column(String(500), nullable=False)
     raw_content = Column(Text, nullable=True)
     # Use dimension from settings
-    content_vector = Column(Vector(settings.EMBEDDING_DIM), nullable=True)
+    #content_vector = Column(Vector(settings.EMBEDDING_DIM), nullable=True)

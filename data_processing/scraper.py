@@ -1,19 +1,16 @@
 # data_processing/scraper.py
-# Keep your existing scraper.py content here as it focuses solely on scraping.
-# Ensure it has necessary imports and the 'stealth.min.js' file is accessible.
-# (Your provided scraper.py code seems appropriate for this file's responsibility)
-
 import logging
 import re
 import time
-import random
+import random # <--- 确保导入 random 模块
 import requests
 import io
-from typing import List, Optional
-from urllib.parse import urljoin
+import os
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+from urllib.parse import urljoin, urlparse, parse_qs
 
-from bs4 import BeautifulSoup
-# Selenium imports (consider making optional if not always needed)
+# --- Selenium Imports ---
 try:
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
@@ -23,297 +20,455 @@ try:
     SELENIUM_AVAILABLE = True
 except ImportError:
     SELENIUM_AVAILABLE = False
-    Options = None # Define as None if Selenium not installed
+    # Define Selenium types as None if not available
+    Options = None
     WebDriverWait = None
     EC = None
     By = None
+    webdriver = None # 添加这个
 
-# PyPDF2 or pypdf (choose one, pypdf recommended)
-# from PyPDF2 import PdfReader # Old
-from pypdf import PdfReader # New
+# --- PDF Parsing ---
+from pypdf import PdfReader # 使用 pypdf
 
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------------------
-# 1. 随机 User-Agent
-# ------------------------------------------------------------------------------
-def get_random_user_agent() -> str:
-    chrome_versions = [
-        '90.0.4430.212', '91.0.4472.124', '92.0.4515.131',
-        '93.0.4577.63', '94.0.4606.71', '95.0.4638.54',
-        '96.0.4664.45', '97.0.4692.71', '98.0.4758.102'
-    ]
-    platform = random.choice([
-        'Windows NT 10.0; Win64; x64',
-        'Macintosh; Intel Mac OS X 12_4'
-    ])
-    return (
-        f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 "
-        f"(KHTML, like Gecko) Chrome/{random.choice(chrome_versions)} Safari/537.36"
-    )
+# --- 保持不变的辅助函数 ---
+# get_random_user_agent, setup_stealth_options, chinese_to_number,
+# extract_section_from_text, stealth_download_pdf, try_construct_pdf_url
+# ... (这些函数的代码如上次回复所示) ...
 
-# ------------------------------------------------------------------------------
-# 2. Stealth 浏览器配置
-# ------------------------------------------------------------------------------
-def setup_stealth_options() -> Options:
-    if not SELENIUM_AVAILABLE:
-        logger.warning("Selenium is not installed. Stealth options cannot be configured.")
-        return None
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument(f"user-agent={get_random_user_agent()}")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
-    chrome_options.add_argument("--disable-infobars")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--no-sandbox")
-    # 随机视口尺寸
-    viewports = [(1920, 1080), (1366, 768), (1536, 864)]
-    w, h = random.choice(viewports)
-    chrome_options.add_argument(f"--window-size={w},{h}")
-    return chrome_options
-
-# ------------------------------------------------------------------------------
-# 3. 动态等待
-# ------------------------------------------------------------------------------
 def dynamic_wait(driver, selector_type: str, selector: str, timeout: int = 15):
-    if not SELENIUM_AVAILABLE or not driver:
-        logger.warning("Selenium not available or driver not provided. Cannot perform dynamic wait.")
+    """智能等待页面元素加载"""
+    if not SELENIUM_AVAILABLE or not driver or not WebDriverWait or not EC or not By: # 检查所有依赖
+        logger.warning("Selenium 相关模块未完全导入或 driver 未提供。无法执行 dynamic_wait。")
         return None
     wait = WebDriverWait(driver, timeout)
+    by_map = {'css': By.CSS_SELECTOR, 'xpath': By.XPATH, 'tag': By.TAG_NAME, 'id': By.ID}
+    if selector_type not in by_map:
+         logger.error(f"无效的选择器类型: {selector_type}")
+         return None
 
     try:
-        if selector_type == 'css':
-            return wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
-        elif selector_type == 'xpath':
-            return wait.until(EC.presence_of_element_located((By.XPATH, selector)))
-        elif selector_type == 'tag':
-            return wait.until(EC.presence_of_element_located((By.TAG_NAME, selector)))
+        # 等待元素变得可见可能更可靠
+        logger.debug(f"Waiting for element ({selector_type}='{selector}') to be visible...")
+        element = wait.until(EC.visibility_of_element_located((by_map[selector_type], selector)))
+        logger.debug(f"Element ({selector_type}='{selector}') is visible.")
+        return element
     except Exception as e:
-        logger.error(f"Dynamic wait failed for {selector_type}='{selector}': {e}")
+        # 超时是常见情况，记录为 warning 而不是 error
+        logger.warning(f"Dynamic wait timed out for ({selector_type}='{selector}'): {e}")
+        return None
+# ==================== 新增/整合的函数 ====================
+def get_random_user_agent() -> str:
+    """生成一个随机的、看起来比较真实的 User-Agent 字符串"""
+    # 基于常见的现代浏览器版本
+    chrome_versions = [
+        '110.0.5481.177', '111.0.5563.64', '112.0.5615.49',
+        '113.0.5672.92', '114.0.5735.198', '115.0.5790.170',
+        '116.0.5845.180', '117.0.5938.149', '118.0.5993.88',
+        '119.0.6045.159', '120.0.6099.129', '121.0.6167.85',
+        '122.0.6261.94', '123.0.6312.86', '124.0.6367.60' # 保持更新
+    ]
+    # 常见的操作系统平台
+    platforms = [
+        'Windows NT 10.0; Win64; x64',      # Windows 10/11
+        'Macintosh; Intel Mac OS X 10_15_7', # macOS Catalina/Big Sur/Monterey etc.
+        'X11; Linux x86_64',               # Linux
+        # '(Linux; Android 13; Pixel 7)', # 可选：添加移动端UA
+    ]
+    # 随机选择版本和平台
+    chosen_version = random.choice(chrome_versions)
+    chosen_platform = random.choice(platforms)
+
+    # 构造 User-Agent 字符串
+    user_agent = (
+        f"Mozilla/5.0 ({chosen_platform}) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{chosen_version} Safari/537.36"
+    )
+    logger.debug(f"Generated User-Agent: {user_agent}")
+    return user_agent
+def try_construct_pdf_url(detail_url: str) -> Optional[str]:
+    """尝试根据详情页 URL 构造直接的 PDF 下载链接"""
+    try:
+        parsed_url = urlparse(detail_url)
+        # 使用 parse_qs 解析查询参数，它返回一个字典，值为列表
+        query_params = parse_qs(parsed_url.query)
+
+        # 从列表中获取第一个元素，如果键不存在或列表为空，则默认为 None
+        announcement_id = query_params.get('announcementId', [None])[0]
+        announcement_time_str = query_params.get('announcementTime', [None])[0]
+
+        if not announcement_id or not announcement_time_str:
+            logger.warning(f"无法从详情页 URL 中提取 announcementId 或 announcementTime: {detail_url}")
+            return None
+
+        # 解析日期，格式化为 yyyy-MM-DD
+        try:
+            # 时间字符串格式如 '2025-04-29 00:00:00'
+            ann_date = datetime.strptime(announcement_time_str.split(' ')[0], '%Y-%m-%d')
+            date_path = ann_date.strftime('%Y-%m-%d')
+        except ValueError:
+            logger.warning(f"无法解析 announcementTime 格式: {announcement_time_str}")
+            return None
+        except Exception as date_e:
+             logger.error(f"解析日期时发生意外错误: {date_e}")
+             return None
+
+
+        # 构造 PDF URL (使用 https)
+        pdf_url = f"https://static.cninfo.com.cn/finalpage/{date_path}/{announcement_id}.PDF"
+        logger.info(f"尝试构造的 PDF URL: {pdf_url}")
+        return pdf_url
+
+    except Exception as e:
+        logger.error(f"构造 PDF URL 时出错: {e}", exc_info=True)
         return None
 
-# ------------------------------------------------------------------------------
-# 4. 中文数字转阿拉伯数字
-# ------------------------------------------------------------------------------
-def chinese_to_number(cn: str) -> int:
-    cn_dict = {
+def chinese_to_number(cn_num: str) -> int:
+    """将简单的中文数字（一到十）转换为阿拉伯数字"""
+    # 也可以扩展这个函数以支持更复杂的中文数字转换，如果需要的话
+    num_map = {
         '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
         '六': 6, '七': 7, '八': 8, '九': 9, '十': 10
     }
-    return cn_dict.get(cn, 0)
-
-# ------------------------------------------------------------------------------
-# 5. 增强版章节提取
-# ------------------------------------------------------------------------------
+    # 查找字符串中所有的中文数字字符并转换第一个找到的
+    # (基于 "第X节" 的模式，通常只有一个数字)
+    num = 0
+    for char in cn_num:
+         if char in num_map:
+              num = num_map[char]
+              break # 找到第一个就停止
+    return num
 def extract_section_from_text(text: str, section_title: str) -> Optional[str]:
-    numbered_pattern = re.compile(
-        rf'第([一二三四五六七八九十]+)节\s*{re.escape(section_title)}'
-        r'(?![^\n]*?\.{4,}\s*\d+)',
-        re.IGNORECASE
-    )
-    unnumbered_pattern = re.compile(
-        rf'(?<=\n)\s*{re.escape(section_title)}\s*\n'
-        r'(?![^\n]*?\.{4,}\s*\d+)',
-        re.IGNORECASE
-    )
-    m_num = numbered_pattern.search(text)
-    m_unn = unnumbered_pattern.search(text)
-
-    if m_num:
-        current_sec = chinese_to_number(m_num.group(1))
-        start_idx = m_num.end()
-    elif m_unn:
-        current_sec = None
-        start_idx = m_unn.end()
-    else:
-        return None
-
-    # 跳过空行或点号行
-    tail = text[start_idx:]
-    m_non = re.search(r'\S', tail)
-    if m_non:
-        start_idx += m_non.start()
-
-    # 小标题偏移
-    subtitle_pat = re.compile(r'[一二三四五六七八九十]+、\s*\S+')
-    m_sub = subtitle_pat.search(text[start_idx:start_idx + 3000])
-    if m_sub:
-        start_idx += m_sub.start()
-
-    # 后续章节查找
-    sec_pat = re.compile(r'第([一二三四五六七八九十]+)节', re.IGNORECASE)
-    end_positions = []
-    for m in sec_pat.finditer(text):
-        num = chinese_to_number(m.group(1))
-        if current_sec is None or num > current_sec:
-            if m.start() > start_idx:
-                end_positions.append(m.start())
-    end_idx = min(end_positions) if end_positions else len(text)
-
-    content = text[start_idx:end_idx].strip()
-    # 清理残留目录行及多余空行
-    content = re.sub(rf'^{re.escape(section_title)}.*?\.{{4,}}\s*\d+$',
-                     '', content, flags=re.MULTILINE)
-    content = re.sub(r'\n{3,}', '\n\n', content)
-    return content or None
-
-# ------------------------------------------------------------------------------
-# 6. 提取 PDF 链接
-# ------------------------------------------------------------------------------
-def extract_pdf_links_enhanced(driver, base_url: str) -> List[str]:
-    try:
-        driver.get(base_url)
-        time.sleep(random.uniform(1.5, 3.5))
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
-        time.sleep(random.uniform(0.8, 1.5))
-        driver.execute_script("window.scrollTo(document.body.scrollHeight/3, document.body.scrollHeight*2/3);")
-        time.sleep(random.uniform(1.0, 2.0))
-
-        dynamic_wait(driver, 'css', 'div.main-content', timeout=20)
-        soup = BeautifulSoup(driver.page_source, 'lxml')
-        links = []
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if href.lower().endswith('.pdf'):
-                full = urljoin(base_url, href.split('#')[0])
-                links.append(full)
-        return list(set(links))
-    except Exception:
-        return []
-
-# ------------------------------------------------------------------------------
-# 7. 隐蔽下载 PDF
-# ------------------------------------------------------------------------------
-def stealth_download_pdf(url: str, referer: str) -> Optional[io.BytesIO]:
-    headers = {
-        'Referer': referer,
-        'User-Agent': get_random_user_agent(),
-        'Accept-Language': 'zh-CN,zh;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-    }
-    try:
-        resp = requests.get(url, headers=headers, timeout=20,
-                            stream=True, allow_redirects=True)
-        resp.raise_for_status()
-        buf = bytearray()
-        for chunk in resp.iter_content(chunk_size=1024):
-            buf.extend(chunk)
-            time.sleep(random.uniform(0.01, 0.1))
-        return io.BytesIO(buf)
-    except Exception:
-        return None
-
-# ------------------------------------------------------------------------------
-# 8. 主函数：抓取全文或章节
-# ------------------------------------------------------------------------------
-def fetch_announcement_text(detail_url: str, title: str) -> Optional[str]:
     """
-    Fetches announcement from a URL (detail_url), attempts to find and download
-    a PDF, extracts text, and optionally extracts a specific section based on title.
+    增强版章节内容提取（基于 test5.py 中的逻辑）。
+    尝试从 PDF 全文中提取指定标题的章节内容。
 
     Args:
-        detail_url: The URL pointing to the announcement page or directly to the PDF.
-        title: The title of the announcement (used to decide section extraction).
+        text: PDF 的完整文本内容。
+        section_title: 要提取的章节标题 (例如 "管理层讨论与分析")。
 
     Returns:
-        The extracted text (full or section), or None if fetching/parsing fails.
+        提取到的章节文本内容，如果未找到则返回 None。
+    """
+    if not text or not section_title:
+        return None
+
+    logger.debug(f"Attempting to extract section: '{section_title}'")
+
+    # 1. 构造正则表达式
+    # 匹配 "第[一二三四五六七八九十]+节<空格或换行符>*章节标题"
+    # 排除像目录页那样的行 "... <数字>"
+    numbered_pattern = re.compile(
+        # ^\s* # 行首允许有空格
+        r'第\s*([一二三四五六七八九十]+)\s*节' # 匹配 "第 X 节" 并捕获中文数字
+        r'\s*'                 # 节 和 标题 之间允许有空格
+        rf'{re.escape(section_title)}' # 匹配章节标题
+        r'(?![^\n]*?\s*\.{3,}\s*\d+)'  # 负向前瞻：确保该行后面不像目录 (没有 ... 和页码)
+        r'\s*$',                # 标题后允许有空格直到行尾
+        re.IGNORECASE | re.MULTILINE # 忽略大小写，多行模式
+    )
+    # 匹配不带 "第X节" 但独占一行的标题 (前后可能有空行)
+    unnumbered_pattern = re.compile(
+        r'^\s*'                 # 行首允许有空格
+        rf'{re.escape(section_title)}' # 匹配章节标题
+        r'(?![^\n]*?\s*\.{3,}\s*\d+)'  # 排除目录行
+        r'\s*$',                # 标题后允许有空格直到行尾
+        re.IGNORECASE | re.MULTILINE
+    )
+
+    # 2. 查找起始位置
+    start_match = numbered_pattern.search(text)
+    current_section_num = None
+    if start_match:
+        current_section_num = chinese_to_number(start_match.group(1))
+        start_idx = start_match.end()
+        logger.debug(f"Found numbered section start (Section {current_section_num}) at index {start_idx}")
+    else:
+        start_match = unnumbered_pattern.search(text)
+        if start_match:
+            start_idx = start_match.end()
+            logger.debug(f"Found unnumbered section start at index {start_idx}")
+        else:
+            logger.warning(f"Section title '{section_title}' not found.")
+            return None # 未找到起始标题
+
+    # 跳过起始标题后的空行或特殊字符行，找到实际内容的开始
+    content_start_match = re.search(r'\S', text[start_idx:], re.MULTILINE)
+    if content_start_match:
+        start_idx += content_start_match.start()
+        logger.debug(f"Actual content start index adjusted to: {start_idx}")
+    else:
+        logger.warning("No actual content found after the section title.")
+        return "" # 标题找到了，但后面没内容
+
+    # 3. 查找结束位置
+    end_idx = len(text) # 默认到文本末尾
+
+    # 查找下一个 "第X节" 作为结束标志
+    next_section_pattern = re.compile(r'^\s*第\s*([一二三四五六七八九十]+)\s*节', re.IGNORECASE | re.MULTILINE)
+    next_section_match = next_section_pattern.search(text, start_idx) # 从 start_idx 开始搜索
+
+    if next_section_match:
+        # 如果当前章节有编号，确保找到的下一个章节编号更大（防止错误匹配文档内的引用）
+        if current_section_num is not None:
+            next_num = chinese_to_number(next_section_match.group(1))
+            if next_num > current_section_num:
+                end_idx = next_section_match.start()
+                logger.debug(f"Found next numbered section (Section {next_num}) at index {end_idx}")
+            else:
+                # 找到的 "第X节" 编号不大于当前编号，可能不是真正的下一章节标题，继续搜索
+                logger.debug(f"Found potential next section (Section {next_num}) but number is not greater than current ({current_section_num}), searching further...")
+                next_section_match_further = next_section_pattern.search(text, next_section_match.end())
+                while next_section_match_further:
+                     next_num_further = chinese_to_number(next_section_match_further.group(1))
+                     if next_num_further > current_section_num:
+                          end_idx = next_section_match_further.start()
+                          logger.debug(f"Found correct next numbered section (Section {next_num_further}) further down at index {end_idx}")
+                          break
+                     next_section_match_further = next_section_pattern.search(text, next_section_match_further.end())
+                else: # while 循环正常结束，没有找到更大的编号
+                     logger.debug("No subsequent section with a greater number found, using end of text.")
+                     end_idx = len(text)
+
+        # 如果当前章节没有编号，找到的第一个 "第X节" 就是结束标志
+        else:
+            end_idx = next_section_match.start()
+            logger.debug(f"Found next numbered section at index {end_idx}")
+    else:
+         logger.debug("No subsequent '第X节' found, using end of text as boundary.")
+
+
+    # 4. 提取并初步清理
+    content = text[start_idx:end_idx].strip()
+    logger.info(f"Extracted section content length: {len(content)}")
+
+    # 进一步清理：移除可能的页眉页脚（简单规则，可能需要优化）
+    # 例如，移除看起来像页码的行 (^\s*\d+\s*$)
+    content = re.sub(r'^\s*\d+\s*$', '', content, flags=re.MULTILINE)
+    # 合并多个空行
+    content = re.sub(r'\n{3,}', '\n\n', content)
+
+    return content if content else None
+def stealth_download_pdf(url: str, referer: Optional[str] = None) -> Optional[io.BytesIO]:
+    """
+    使用 requests 隐蔽地下载 PDF 文件内容。
+
+    Args:
+        url: 要下载的 PDF URL。
+        referer: 可选的 Referer 请求头。
+
+    Returns:
+        包含 PDF 内容的 BytesIO 对象，如果下载失败则返回 None。
+    """
+    headers = {
+        'User-Agent': get_random_user_agent(), # 使用随机 User-Agent
+        'Accept': 'application/pdf,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1', # 尝试升级到 HTTPS
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin' if referer and urlparse(url).netloc == urlparse(referer).netloc else 'cross-site', # 根据 referer 判断
+        'Sec-Fetch-User': '?1',
+        # 添加 CH-UA 头 (可选，模拟现代浏览器)
+        'Sec-CH-UA': '"Chromium";v="110", "Not A(Brand";v="24", "Google Chrome";v="110"',
+        'Sec-CH-UA-Mobile': '?0',
+        'Sec-CH-UA-Platform': '"Windows"', # 或 "macOS", "Linux" 等
+    }
+    # 仅在 referer 有效时添加
+    if referer:
+        headers['Referer'] = referer
+
+    try:
+        logger.debug(f"Requesting PDF from {url} with headers: {headers}")
+        # 增加 stream=True 和 timeout，允许重定向
+        resp = requests.get(url, headers=headers, timeout=45, stream=True, allow_redirects=True) # 增加超时
+        resp.raise_for_status() # 检查 HTTP 错误 (4xx, 5xx)
+
+        # 检查 Content-Type 是否真的是 PDF
+        content_type = resp.headers.get('Content-Type', '').lower()
+        if 'application/pdf' not in content_type:
+             logger.warning(f"URL {url} Content-Type is not PDF: {content_type}. Headers: {resp.headers}")
+             # 可以选择返回 None 或者尝试处理（如果网站用错误类型返回PDF）
+             # return None # 严格模式
+             pass # 宽松模式，继续尝试读取内容
+
+        # 使用 iter_content 读取内容
+        pdf_content = b''.join(chunk for chunk in resp.iter_content(chunk_size=8192))
+
+        if not pdf_content:
+            logger.warning(f"Downloaded empty content from {url}")
+            return None
+
+        logger.info(f"Successfully downloaded PDF content from {url} ({len(pdf_content)} bytes)")
+        return io.BytesIO(pdf_content) # 返回 BytesIO 对象
+
+    except requests.exceptions.Timeout:
+         logger.error(f"Stealth download timed out for {url}")
+         return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Stealth download request failed for {url}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error during stealth download for {url}: {e}", exc_info=True)
+        return None
+
+# ========================================================
+# ==================== 新增 setup_stealth_options 函数 ====================
+def setup_stealth_options() -> Optional[Options]:
+    """配置反反爬虫的 Selenium Chrome 浏览器选项"""
+    if not SELENIUM_AVAILABLE or not Options: # 检查 Options 是否导入成功
+        logger.error("Selenium Options class is not available. Cannot setup stealth options.")
+        return None
+
+    chrome_options = Options()
+    # 基础伪装
+    # chrome_options.add_argument("--headless") # <--- 注意：为了调试方便，可以先注释掉 headless
+    chrome_options.add_argument(f"user-agent={get_random_user_agent()}") # 使用随机 UA
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled") # 禁用 webdriver 标志
+
+    # 实验性选项
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+
+    # 禁用自动化特征
+    chrome_options.add_argument("--disable-infobars")       # 禁用 "Chrome is being controlled by automated test software"
+    chrome_options.add_argument("--disable-dev-shm-usage") # 解决 Docker 或某些 Linux 环境下的问题
+    chrome_options.add_argument("--no-sandbox")            # 禁用沙箱模式
+
+    # 随机化视口大小 (可选)
+    viewports = [(1920, 1080), (1366, 768), (1536, 864)]
+    w, h = random.choice(viewports)
+    chrome_options.add_argument(f"--window-size={w},{h}")
+
+    # 其他可能的选项 (根据需要添加)
+    # chrome_options.add_argument('--ignore-certificate-errors')
+    # chrome_options.add_argument('--allow-running-insecure-content')
+    # chrome_options.add_argument("--disable-extensions")
+    # chrome_options.add_argument("--proxy-server='direct://'")
+    # chrome_options.add_argument("--proxy-bypass-list=*")
+    # chrome_options.add_argument('--log-level=3') # 减少日志输出
+
+    logger.debug("Stealth Chrome options configured.")
+    return chrome_options
+# ======================================================================
+# --- 主函数：抓取全文或章节 ---
+def fetch_announcement_text(detail_url: str, title: str) -> Optional[str]:
+    """
+    获取公告文本。优先尝试直接构造 PDF URL 下载，
+    如果失败，则使用 Selenium 查找 embed 标签获取 URL。
     """
     logger.info(f"Fetching announcement: '{title}' from {detail_url}")
-
-    # 新增逻辑：如果标题包含"摘要"则直接返回None
     if "摘要" in title:
         logger.info(f"Skipping processing for abstract announcement: {title}")
         return None
-    # Determine if Selenium is needed (e.g., for complex sites like cninfo)
-    # You might refine this condition based on the URL patterns
-    use_selenium = SELENIUM_AVAILABLE and "cninfo.com.cn" in detail_url
 
-    pdf_url = detail_url # Assume detail_url might be the direct PDF link initially
     pdf_stream = None
+    pdf_url_to_process = None
 
-    if use_selenium:
+    # --- 1. 尝试直接构造 PDF URL (优先) ---
+    constructed_pdf_url = try_construct_pdf_url(detail_url)
+    if constructed_pdf_url:
+        logger.info(f"Attempting direct download using constructed URL: {constructed_pdf_url}")
+        pdf_stream = stealth_download_pdf(constructed_pdf_url, referer=detail_url) # 使用 detail_url 作为 Referer
+        if pdf_stream:
+            pdf_url_to_process = constructed_pdf_url
+            logger.info("Direct download successful using constructed URL.")
+        else:
+            logger.warning("Direct download failed using constructed URL, falling back to Selenium...")
+
+    # --- 2. 如果直接构造/下载失败，尝试 Selenium (查找 embed 标签) ---
+    if not pdf_stream and SELENIUM_AVAILABLE:
+        logger.info("Attempting Selenium fallback to find PDF link in <embed> tag...")
         driver = None
+        selenium_pdf_url = None # 初始化变量
         try:
             chrome_opts = setup_stealth_options()
-            if not chrome_opts: return None # Exit if Selenium setup failed
+            if not chrome_opts: return None
 
-            # Consider using webdriver_manager or specifying driver path
+            # 确保 webdriver 导入成功
+            if not webdriver:
+                 logger.error("Selenium is available but webdriver could not be imported.")
+                 return None
             driver = webdriver.Chrome(options=chrome_opts)
 
-            # Inject stealth.js if needed (ensure file exists)
-            try:
-                with open('stealth.min.js', encoding='utf-8') as f:
-                    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": f.read()})
-            except FileNotFoundError:
-                logger.warning("stealth.min.js not found. Proceeding without stealth script injection.")
-            except Exception as e:
-                 logger.warning(f"Error executing stealth script: {e}")
-
-
-            # Establish session (optional, might help with cookies)
-            # driver.get("https://www.cninfo.com.cn/")
-            # time.sleep(random.uniform(1.0, 2.0))
-
-            # Extract actual PDF links from the detail page
-            pdf_links = extract_pdf_links_enhanced(driver, detail_url)
-            if not pdf_links:
-                logger.warning(f"No PDF links found on page {detail_url} using Selenium.")
-                # Maybe try direct download as fallback?
+            # --- 注入 Stealth Script ---
+            stealth_script_path = 'stealth.min.js' # 假设在项目根目录
+            if not os.path.exists(stealth_script_path):
+                 logger.warning(f"Stealth script not found at {stealth_script_path}. Proceeding without it.")
             else:
-                pdf_url = pdf_links[0] # Use the first PDF link found
-                logger.info(f"Found PDF link via Selenium: {pdf_url}")
-                # Download using stealth requests, using detail_url as referer
-                pdf_stream = stealth_download_pdf(pdf_url, detail_url)
+                 try:
+                     with open(stealth_script_path, encoding='utf-8') as f:
+                         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": f.read()})
+                     logger.info("Stealth script injected.")
+                 except Exception as e:
+                     logger.warning(f"Error executing stealth script: {e}")
+            # --------------------------
+
+            driver.get(detail_url)
+            # 不需要太复杂的滚动，因为 embed 通常在主框架中
+            time.sleep(random.uniform(1.0, 2.0))
+
+            # --- 修改等待逻辑：等待 embed 标签出现并可见 ---
+            embed_selector = 'embed.pdfobject[src*=".pdf"], embed.pdfobject[src*=".PDF"]' # CSS Selector
+            logger.info(f"Waiting up to 35s for embed element to be visible: {embed_selector}")
+            # 使用 dynamic_wait 等待元素可见
+            wait_element = dynamic_wait(driver, 'css', embed_selector, timeout=35)
+
+            if wait_element:
+                logger.info("Selenium found visible embed PDF element. Extracting src...")
+                try:
+                    selenium_pdf_url_raw = wait_element.get_attribute('src')
+                    if selenium_pdf_url_raw:
+                         # 清理 URL，移除 # 后面的部分，并确保是绝对 URL
+                         selenium_pdf_url = urljoin(detail_url, selenium_pdf_url_raw.split('#')[0])
+                         logger.info(f"Extracted PDF URL from embed src: {selenium_pdf_url}")
+                    else:
+                         logger.warning("Found embed element but could not extract src attribute.")
+                except Exception as e_get_attr:
+                     logger.error(f"Error getting src attribute from embed element: {e_get_attr}")
+            else:
+                logger.warning(f"Selenium timed out waiting for embed PDF element on {detail_url}.")
+                # （可选）即使等待失败，也可以尝试最后解析一次页面源码
+                # soup = BeautifulSoup(driver.page_source, 'lxml')
+                # embed_tag = soup.select_one(embed_selector)
+                # if embed_tag and embed_tag.get('src'): ...
+
+            # --- 如果通过 Selenium 找到了 URL，尝试下载 ---
+            if selenium_pdf_url:
+                 logger.info(f"Attempting download using URL from Selenium: {selenium_pdf_url}")
+                 pdf_stream = stealth_download_pdf(selenium_pdf_url, referer=detail_url)
+                 if pdf_stream:
+                     pdf_url_to_process = selenium_pdf_url
+                     logger.info("Successfully downloaded PDF using URL found via Selenium.")
+                 else:
+                     logger.warning(f"Download failed for URL found via Selenium: {selenium_pdf_url}")
+            else:
+                 logger.warning("Could not extract a valid PDF URL using Selenium method.")
+
 
         except Exception as e:
-            logger.error(f"Error during Selenium operation for {detail_url}: {e}", exc_info=True)
-            # Fallback or return None
+            logger.error(f"General Selenium operation error for {detail_url}: {e}", exc_info=True)
         finally:
             if driver:
                 driver.quit()
-    else:
-        # If not using Selenium, attempt direct download or basic link finding
-        logger.info(f"Attempting direct download or basic extraction for {detail_url} (Selenium not used/needed).")
-        # Try direct download first
-        pdf_stream = stealth_download_pdf(detail_url, detail_url) # Use URL as its own referer? Or a generic one?
+                logger.debug("Selenium driver quit.")
 
-        # If direct download fails or it's HTML, try basic link finding
-        if pdf_stream is None or b'html' in pdf_stream.getvalue()[:100].lower(): # Quick check if it looks like HTML
-             try:
-                 headers = {'User-Agent': get_random_user_agent()}
-                 response = requests.get(detail_url, headers=headers, timeout=15)
-                 response.raise_for_status()
-                 soup = BeautifulSoup(response.text, 'lxml')
-                 found_links = []
-                 for a in soup.find_all('a', href=True):
-                     href = a['href']
-                     if href.lower().endswith('.pdf'):
-                         found_links.append(urljoin(detail_url, href.split('#')[0]))
-
-                 if found_links:
-                     pdf_url = found_links[0]
-                     logger.info(f"Found PDF link via basic parsing: {pdf_url}")
-                     pdf_stream = stealth_download_pdf(pdf_url, detail_url)
-                 else:
-                      logger.warning(f"No PDF link found via basic parsing on {detail_url}")
-                      pdf_stream = None # Ensure stream is None if no PDF found
-
-             except Exception as e:
-                 logger.error(f"Error during basic request/parsing for {detail_url}: {e}")
-                 pdf_stream = None
-
-
-    # --- Process the PDF stream if obtained ---
+    # --- 处理获取到的 PDF 流 ---
     if not pdf_stream:
-        logger.error(f"Failed to obtain PDF stream for {title} from {detail_url} (or derived URL {pdf_url}).")
+        logger.error(f"Ultimately failed to obtain PDF stream for '{title}' from {detail_url}")
         return None
 
+    logger.info(f"Processing PDF stream obtained from URL: {pdf_url_to_process}")
     try:
         reader = PdfReader(pdf_stream)
+        if reader.is_encrypted:
+             logger.warning(f"PDF is encrypted: {pdf_url_to_process}")
+             return None
         if len(reader.pages) == 0:
-            logger.warning(f"PDF appears to be empty or corrupted: {pdf_url}")
+            logger.warning(f"PDF appears to be empty: {pdf_url_to_process}")
             return None
 
         full_text = ""
@@ -323,28 +478,39 @@ def fetch_announcement_text(detail_url: str, title: str) -> Optional[str]:
                 if page_text:
                     full_text += page_text + "\n"
             except Exception as page_err:
-                logger.warning(f"Error extracting text from page {i+1} of {pdf_url}: {page_err}")
-                continue # Skip problematic pages
+                # 记录更详细的页码错误
+                logger.warning(f"Error extracting text from page {i+1}/{len(reader.pages)} of {pdf_url_to_process}: {page_err}")
+                continue # 继续处理下一页
 
         if not full_text.strip():
-             logger.warning(f"Text extraction yielded empty result for {pdf_url}.")
-             return None
+             logger.warning(f"Text extraction yielded empty result for {pdf_url_to_process}.")
+             # 即使提取为空，也可能返回一个空字符串或 None，取决于下游是否需要区分
+             return None # 或者 return ""
 
-        logger.info(f"Successfully extracted text (length: {len(full_text)}) from {pdf_url}")
+        logger.info(f"Successfully extracted text (length: {len(full_text)}) from {pdf_url_to_process}")
 
-        # Section extraction based on title
+        # 章节提取逻辑
         if '年度报告' in title or '半年度报告' in title:
-            section = extract_section_from_text(full_text, "管理层讨论与分析")
-            if section:
-                logger.info("Extracted '管理层讨论与分析' section.")
-                return section
+            if '摘要' not in title:
+                 logger.debug(f"Attempting to extract '管理层讨论与分析' from non-abstract report: {title}")
+                 section = extract_section_from_text(full_text, "管理层讨论与分析")
+                 if section:
+                     logger.info("Extracted '管理层讨论与分析' section.")
+                     return section
+                 else:
+                     logger.warning("Could not extract '管理层讨论与分析', returning full text for non-abstract report.")
+                     return full_text.strip()
             else:
-                logger.warning("Could not extract '管理层讨论与分析', returning full text.")
-                return full_text # Fallback to full text
+                 logger.info("Returning full text for abstract report.")
+                 return full_text.strip()
+        else:
+            logger.info("Returning full text for other announcement types.")
+            return full_text.strip()
 
-        # Other announcement types: return full text
-        return full_text.strip()
-
+    except ImportError as e_pypdf:
+         # 特别处理 pypdf 可能的导入错误
+         logger.critical(f"pypdf library might be missing or corrupted: {e_pypdf}. Please install/reinstall it.")
+         return None
     except Exception as e:
-        logger.error(f"Error processing PDF stream from {pdf_url}: {e}", exc_info=True)
+        logger.error(f"Error processing PDF stream from {pdf_url_to_process}: {e}", exc_info=True)
         return None

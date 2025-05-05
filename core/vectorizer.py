@@ -74,6 +74,72 @@ def get_embedding(text: str, is_query: bool = False) -> list[float] | None:
         logger.error(f"Error generating embedding for text snippet '{text[:100]}...': {e}", exc_info=True)
         return None
 
-# Future Enhancement: Add text chunking logic here if needed
-# def split_text_into_chunks(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
-#    ... implementation using libraries like LangChain's text_splitter ...
+def split_text_into_chunks(text: str, chunk_size: int = 450, chunk_overlap: int = 50) -> list[str]:
+    """
+    Splits text into overlapping chunks based on character count and sentence boundaries.
+
+    Args:
+        text: The input text.
+        chunk_size: The target size for each chunk (in characters).
+        chunk_overlap: The number of characters to overlap between chunks.
+
+    Returns:
+        A list of text chunks.
+    """
+    if not text:
+        return []
+
+    # Basic sentence splitting using common delimiters
+    sentences = re.split(r'(?<=[。！？\n\.\?!])\s*', text)
+    sentences = [s for s in sentences if s] # Remove empty strings
+
+    chunks = []
+    current_chunk = ""
+    current_length = 0
+
+    for sentence in sentences:
+        sentence_length = len(sentence)
+        if not current_chunk: # Start a new chunk
+             current_chunk = sentence
+             current_length = sentence_length
+        elif current_length + sentence_length <= chunk_size: # Add to current chunk
+            current_chunk += " " + sentence
+            current_length += sentence_length + 1 # Add 1 for space
+        else: # Current chunk is full, start a new one
+            chunks.append(current_chunk)
+            # Create overlap
+            overlap_start_index = max(0, len(current_chunk) - chunk_overlap)
+            # Try to find a sentence boundary within the overlap window for cleaner cuts
+            overlap_text = current_chunk[overlap_start_index:]
+            sentence_end_in_overlap = re.search(r'[。！？\n\.\?!]', overlap_text)
+            if sentence_end_in_overlap:
+                 overlap_point = overlap_start_index + sentence_end_in_overlap.end()
+                 next_chunk_start_text = current_chunk[overlap_point:].lstrip()
+            else:
+                 # If no sentence end found, just use the character overlap
+                 next_chunk_start_text = current_chunk[len(current_chunk) - chunk_overlap:].lstrip()
+
+            # Start new chunk with overlap and the new sentence
+            current_chunk = next_chunk_start_text + " " + sentence if next_chunk_start_text else sentence
+            current_length = len(current_chunk)
+
+
+    if current_chunk: # Add the last chunk
+        chunks.append(current_chunk)
+
+    # Further refinement: ensure no chunk significantly exceeds chunk_size (optional)
+    final_chunks = []
+    for chunk in chunks:
+        if len(chunk) > chunk_size * 1.2: # If a single sentence chunk is too large
+             # Simple split if a chunk is still too large
+             start = 0
+             while start < len(chunk):
+                  end = min(start + chunk_size, len(chunk))
+                  final_chunks.append(chunk[start:end])
+                  start += chunk_size - chunk_overlap # Move forward with overlap
+        else:
+             final_chunks.append(chunk)
+
+
+    logger.info(f"Split text (length: {len(text)}) into {len(final_chunks)} chunks.")
+    return final_chunks
