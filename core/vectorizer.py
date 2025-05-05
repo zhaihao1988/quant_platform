@@ -1,4 +1,5 @@
 # core/vectorizer.py
+import re
 import logging
 from sentence_transformers import SentenceTransformer
 from config.settings import settings # Import settings
