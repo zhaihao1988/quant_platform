@@ -2,17 +2,20 @@
 import logging
 import pandas as pd
 from sqlalchemy.orm import Session
-import ollama # Ollama client library
-from typing import Optional, Dict, Any
+import ollama
+from typing import Optional, Dict, Any, List
+import json
+import time
 
 # Import settings and utility functions/classes
-from config import settings
-from db.models import StockDisclosure # Only need StockDisclosure for type hint here
+from config.settings import settings
+from db.models import StockDisclosure
 from db.crud import get_stock_list_info, retrieve_relevant_disclosures
-from data_processing.loader import load_price_data, load_financial_data # Load data here
+from data_processing.loader import load_price_data, load_financial_data
 from integrations.web_search import search_financial_news_google
 
 logger = logging.getLogger(__name__)
+
 
 # --- Ollama LLM Interaction ---
 def call_local_llm(prompt: str) -> str:
@@ -20,70 +23,62 @@ def call_local_llm(prompt: str) -> str:
     Calls the configured local Ollama model to generate text based on the prompt.
     """
     model_name = settings.OLLAMA_MODEL
-    # Consider adding max_tokens to settings if needed, otherwise Ollama defaults apply
-    # max_tokens = settings.OLLAMA_MAX_TOKENS
-
     logger.info(f"Calling local Ollama model: '{model_name}'. Prompt length: {len(prompt)} chars.")
     if not model_name:
         logger.error("OLLAMA_MODEL not configured in settings.")
         return "Error: LLM model name not configured."
 
     try:
-        # Ensure the Ollama service is running locally or at the specified host
         response = ollama.generate(
             model=model_name,
             prompt=prompt,
-            # stream=False, # Keep stream False for a single complete response
-            # options={'num_predict': max_tokens} # Control output length if needed, check Ollama docs for param name
         )
         generated_text = response.get('response', '').strip()
         logger.info(f"Ollama generation complete. Response length: {len(generated_text)} chars.")
         if not generated_text:
-             logger.warning("Ollama model returned an empty response.")
-             return "Error: LLM returned an empty response."
+            logger.warning("Ollama model returned an empty response.")
+            return "Error: LLM returned an empty response."
         return generated_text
 
     except ollama.ResponseError as e:
-        # Handle specific Ollama API errors (e.g., model not found, connection error)
         logger.error(f"Ollama API Error: Status Code {e.status_code}, Error: {e.error}", exc_info=True)
         return (f"Error: Ollama API request failed ({e.status_code} - {e.error}). "
                 f"Ensure Ollama server is running and model '{model_name}' is available/pulled.")
     except Exception as e:
-        # Catch other potential errors (network issues, library errors)
         logger.error(f"Error calling local Ollama model '{model_name}': {e}", exc_info=True)
         return f"Error: Failed to generate response from LLM '{model_name}'. Check logs for details."
 
 
 # --- Context Formatting Functions ---
-def format_kb_results(disclosures: list[StockDisclosure]) -> str:
+def format_kb_results(disclosures: List[StockDisclosure]) -> str:
     """Formats retrieved knowledge base disclosures for the prompt."""
     if not disclosures:
         return "本地知识库: 未找到相关历史公告。\n"
 
     formatted = "--- 本地知识库 (相关历史公告摘要) ---\n"
     for i, disc in enumerate(disclosures):
-        # Use raw_content and ann_date as per the model
-        content_snippet = disc.raw_content[:600] + "..." if disc.raw_content and len(disc.raw_content) > 600 else disc.raw_content # Slightly longer snippet
+        content_snippet = disc.raw_content[:600] + "..." if disc.raw_content and len(
+            disc.raw_content) > 600 else disc.raw_content
         publish_date_str = disc.ann_date.strftime('%Y-%m-%d') if disc.ann_date else "N/A"
-        formatted += f"{i+1}. 《{disc.title}》 ({publish_date_str})\n"
+        formatted += f"{i + 1}. 《{disc.title}》 ({publish_date_str})\n"
         formatted += f"   摘要: {content_snippet}\n\n"
     formatted += "--- 知识库信息结束 ---\n"
     return formatted
 
-def format_web_results(results: list[dict]) -> str:
+
+def format_web_results(results: List[dict]) -> str:
     """Formats web search results (snippets) for the prompt."""
     if not results:
         return "网络搜索: 未找到近期相关信息。\n"
 
     formatted = "--- 近期网络信息 (搜索结果摘要) ---\n"
     for i, res in enumerate(results):
-        formatted += f"{i+1}. {res.get('title', 'N/A')}\n"
-        # Use the snippet from Google CSE
+        formatted += f"{i + 1}. {res.get('title', 'N/A')}\n"
         formatted += f"   摘要: {res.get('snippet', 'N/A')}\n"
-        # formatted += f"   链接: {res.get('link', '#')}\n" # Optionally include link
         formatted += "\n"
     formatted += "--- 网络信息结束 ---\n"
     return formatted
+
 
 def format_price_data(df_price: Optional[pd.DataFrame]) -> str:
     """Formats recent price data for the prompt."""
@@ -95,19 +90,19 @@ def format_price_data(df_price: Optional[pd.DataFrame]) -> str:
         df_price['Date'] = pd.to_datetime(df_price['date']).dt.strftime('%Y-%m-%d')
         first_day = df_price.iloc[0]
         last_day = df_price.iloc[-1]
-        overall_change = ((last_day['close'] - first_day['close']) / first_day['close']) * 100 if first_day['close'] else 0
+        overall_change = ((last_day['close'] - first_day['close']) / first_day['close']) * 100 if first_day[
+            'close'] else 0
 
         formatted += f"时间范围: {first_day['Date']} 至 {last_day['Date']}\n"
         formatted += f"期间收盘价变动: 从 {first_day['close']:.2f} 到 {last_day['close']:.2f} (涨跌幅: {overall_change:.2f}%)\n"
         formatted += "每日概览:\n"
-        # Display first, middle, last day for brevity, or all if few days
-        indices_to_show = [0, len(df_price)//2, len(df_price)-1] if len(df_price) > 3 else range(len(df_price))
-        for i in sorted(list(set(indices_to_show))): # Show unique indices in order
-             row = df_price.iloc[i]
-             change_str = f"{row.get('pct_change', float('nan')):.2f}%" # Handle missing pct_change
-             volume_str = f"{int(row.get('volume', 0))}手"
-             turnover_str = f"{row.get('turnover', float('nan')):.2f}%"
-             formatted += f"  - {row['Date']}: 收盘价 {row['close']:.2f} (涨跌幅 {change_str}), 成交量 {volume_str}, 换手率 {turnover_str}\n"
+        indices_to_show = [0, len(df_price) // 2, len(df_price) - 1] if len(df_price) > 3 else range(len(df_price))
+        for i in sorted(list(set(indices_to_show))):
+            row = df_price.iloc[i]
+            change_str = f"{row.get('pct_change', float('nan')):.2f}%"
+            volume_str = f"{int(row.get('volume', 0))}手"
+            turnover_str = f"{row.get('turnover', float('nan')):.2f}%"
+            formatted += f"  - {row['Date']}: 收盘价 {row['close']:.2f} (涨跌幅 {change_str}), 成交量 {volume_str}, 换手率 {turnover_str}\n"
         formatted += "---\n"
     except Exception as e:
         logger.error(f"Error formatting price data: {e}", exc_info=True)
@@ -116,54 +111,92 @@ def format_price_data(df_price: Optional[pd.DataFrame]) -> str:
 
 
 def format_financial_data(financials: Optional[Dict[str, Any]], report_type: str) -> str:
-    """Formats latest financial data (JSON) for the prompt."""
+    """Formats latest financial data (JSONB) for the prompt, dynamically extracting all fields."""
     if not financials:
         return f"最新{report_type}财务数据: [数据库中无可用数据]\n"
 
-    formatted = f"--- 最新{report_type}财务数据 (摘要) ---\n"
-    try:
-        # Extract and display key metrics based on report_type
-        # This requires knowing the structure of your JSON data
-        if report_type == 'benefit' and isinstance(financials, dict): # Example for income statement
-            key_metrics = {
-                "营业总收入": financials.get("operating_income"),
-                "营业总成本": financials.get("operating_cost"),
-                "净利润": financials.get("net_profit"),
-                "基本每股收益": financials.get("basic_eps"),
-                # Add more relevant metrics...
-            }
-        elif report_type == 'balance' and isinstance(financials, dict): # Example for balance sheet
-             key_metrics = {
-                 "总资产": financials.get("total_assets"),
-                 "总负债": financials.get("total_liabilities"),
-                 "归属母公司所有者权益": financials.get("equity_attributable_to_parent"),
-                 "资产负债率": financials.get("debt_to_asset_ratio"),
-                 # Add more...
-             }
-        # Add elif for 'cashflow' etc.
-        else:
-             key_metrics = {"原始数据": str(financials)[:500] + "..."} # Fallback for unknown types
+    # Validate report type
+    valid_report_types = ['benefit', 'debt', 'cash']
+    if report_type not in valid_report_types:
+        logger.warning(f"Invalid report type: {report_type}. Using raw data display.")
+        report_type = "财务"
 
-        for key, value in key_metrics.items():
-             formatted += f"  {key}: {value if value is not None else 'N/A'}\n"
+    # Map report types to Chinese names for display
+    report_type_names = {
+        'benefit': '利润表',
+        'debt': '资产负债表',
+        'cash': '现金流量表'
+    }
+    display_name = report_type_names.get(report_type, report_type)
+
+    formatted = f"--- 最新{display_name}财务数据 (完整字段) ---\n"
+
+    def convert_chinese_number(value):
+        """Convert numbers with Chinese units (亿/万) to standard numeric format"""
+        if isinstance(value, str):
+            if '亿' in value:
+                try:
+                    num = float(value.replace('亿', '').strip())
+                    return num * 100000000
+                except ValueError:
+                    return value
+            elif '万' in value:
+                try:
+                    num = float(value.replace('万', '').strip())
+                    return num * 10000
+                except ValueError:
+                    return value
+        return value
+
+    try:
+        if not isinstance(financials, dict):
+            # If data is not already a dict, try to parse it from JSON string
+            try:
+                financials = json.loads(financials)
+            except (TypeError, json.JSONDecodeError):
+                logger.error(f"Financial data is not in expected format (dict or JSON string): {type(financials)}")
+                return f"最新{display_name}财务数据: [数据格式错误]\n"
+
+        if not financials:
+            return f"最新{display_name}财务数据: [数据为空]\n"
+
+        # Dynamically extract all fields from the JSON data
+        for key, value in financials.items():
+            # First convert any Chinese number units
+            converted_value = convert_chinese_number(value)
+
+            # Format the value based on its type
+            if isinstance(converted_value, (int, float)):
+                # For numbers, format with commas for thousands and 2 decimal places
+                formatted_value = f"{converted_value:,.2f}" if isinstance(converted_value,
+                                                                          float) else f"{converted_value:,}"
+            elif isinstance(converted_value, str):
+                # For strings, just use as-is
+                formatted_value = converted_value
+            else:
+                # For other types (lists, dicts), convert to string
+                formatted_value = str(converted_value)
+
+            formatted += f"  {key}: {formatted_value}\n"
+
         formatted += "---\n"
 
     except Exception as e:
         logger.error(f"Error formatting financial data ({report_type}): {e}", exc_info=True)
-        formatted += "[格式化财务数据时出错]\n"
+        formatted += f"[格式化{display_name}财务数据时出错]\n"
 
     return formatted
 
 
 # --- Prompt Generation ---
 def generate_stock_report_prompt(
-    symbol: str,
-    company_name: str,
-    kb_context: str,
-    web_context: str,
-    price_context: str,
-    financial_context: str # Added financial context
-    ) -> str:
+        symbol: str,
+        company_name: str,
+        kb_context: str,
+        web_context: str,
+        price_context: str,
+        financial_context: str
+) -> str:
     """
     Builds the final structured prompt string for the LLM.
     """
@@ -236,16 +269,21 @@ def generate_stock_report(db: Session, symbol: str) -> Optional[str]:
     logger.info(f"Processing: {company_name} ({symbol}), Industry: {industry}")
 
     # 2. Load Price and Financial Data
-    price_df = load_price_data(symbol, window=5) # Load last 5 days
-    # Load relevant financial reports (e.g., income statement and balance sheet)
+    price_df = load_price_data(symbol, window=5)
+    # Load all three types of financial reports
     financial_benefit = load_financial_data(symbol, report_type='benefit')
-    financial_balance = load_financial_data(symbol, report_type='balance')
+    financial_debt = load_financial_data(symbol, report_type='debt')
+    financial_cash = load_financial_data(symbol, report_type='cash')
+
     # Format the loaded data for the prompt
     price_context = format_price_data(price_df)
-    financial_context = format_financial_data(financial_benefit, '利润表') + format_financial_data(financial_balance, '资产负债表')
+    financial_context = (
+            format_financial_data(financial_benefit, 'benefit') +
+            format_financial_data(financial_debt, 'debt') +
+            format_financial_data(financial_cash, 'cash')
+    )
 
     # 3. Retrieve from Knowledge Base (KB)
-    # Define queries relevant to the desired report sections
     kb_queries = {
         "业务与产品": f"{company_name} 主营业务 核心产品 最新进展",
         "竞争力与风险": f"{company_name} 竞争优势 风险因素 护城河",
@@ -255,10 +293,8 @@ def generate_stock_report(db: Session, symbol: str) -> Optional[str]:
     kb_context_parts = []
     for query_desc, query_text in kb_queries.items():
         logger.debug(f"Retrieving KB context for: {query_desc}")
-        # Retrieve top 2-3 relevant disclosures per query
         disclosures = retrieve_relevant_disclosures(db, symbol, query_text, top_k=3)
         if disclosures:
-            # Format results for the prompt
             kb_context_parts.append(format_kb_results(disclosures))
         else:
             logger.info(f"No KB results found for query: '{query_text[:50]}...'")
@@ -280,9 +316,6 @@ def generate_stock_report(db: Session, symbol: str) -> Optional[str]:
         price_context=price_context,
         financial_context=financial_context
     )
-    # Log prompt length, maybe parts of it for debugging (be careful with sensitive info)
-    # logger.debug(f"Final Prompt (excerpt):\n{final_prompt[:500]}\n...\n{final_prompt[-500:]}")
-
 
     # 6. Call Local LLM
     logger.info("Calling local LLM to generate the report...")
@@ -291,12 +324,11 @@ def generate_stock_report(db: Session, symbol: str) -> Optional[str]:
     # 7. Validate and Return Report
     if generated_report.startswith("Error:"):
         logger.error(f"Report generation failed for {symbol}. LLM Error: {generated_report}")
-        return None # Return None on failure
+        return None
     elif not generated_report:
-         logger.error(f"Report generation failed for {symbol}. LLM returned empty string.")
-         return None
+        logger.error(f"Report generation failed for {symbol}. LLM returned empty string.")
+        return None
     else:
         logger.info(f"Successfully generated report for {symbol}.")
-        # Optionally add metadata to the report here if needed
         report_header = f"**股票分析报告 ({time.strftime('%Y-%m-%d %H:%M:%S')})**\n**标的:** {company_name} ({symbol})\n\n"
-        return report_header + generated_report # Prepend a header
+        return report_header + generated_report

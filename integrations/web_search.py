@@ -6,7 +6,7 @@ import requests
 from typing import List, Dict, Optional
 
 # Import settings correctly
-from config import settings
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 

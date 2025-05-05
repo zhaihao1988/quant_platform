@@ -5,11 +5,11 @@
 import akshare as ak
 import pandas as pd
 from sqlalchemy.orm import sessionmaker
-from db.database import get_engine
+from db.database import get_engine_instance
 from scripts.init_db import Base, StockFinancial
 
 # 数据库引擎和会话
-engine = get_engine()
+engine = get_engine_instance()
 Session = sessionmaker(bind=engine)
 
 # 三大财报接口映射

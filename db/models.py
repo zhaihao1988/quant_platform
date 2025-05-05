@@ -2,7 +2,7 @@
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, Integer, String, Float, Date, Text, JSON # Added JSON for financial data
 from pgvector.sqlalchemy import Vector
-from config import settings # Import settings to get dimension
+from config.settings import settings # Import settings to get dimension
 
 Base = declarative_base()
 

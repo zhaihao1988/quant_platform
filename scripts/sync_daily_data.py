@@ -3,11 +3,11 @@ import akshare as ak
 import pandas as pd
 from datetime import datetime, timedelta
 from sqlalchemy.orm import sessionmaker
-from db.database import get_engine
+from db.database import get_engine_instance
 from db.models import StockDaily, StockList
 import time
 
-engine = get_engine()
+engine = get_engine_instance()
 Session = sessionmaker(bind=engine)
 
 def get_stock_pool():

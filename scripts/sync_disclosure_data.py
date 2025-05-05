@@ -8,11 +8,11 @@ import pandas as pd
 from sqlalchemy import Index
 from sqlalchemy.orm import sessionmaker
 
-from db.database import get_engine
+from db.database import get_engine_instance
 from db.models import StockList, StockDisclosure
 
 # 创建数据库引擎与 Session
-engine = get_engine()
+engine = get_engine_instance()
 Session = sessionmaker(bind=engine)
 
 def get_stock_pool() -> pd.DataFrame:

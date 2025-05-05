@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker, Session as SessionClass # Use SessionCl
 from contextlib import contextmanager
 
 # Import settings
-from config import settings
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 

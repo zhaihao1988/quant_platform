@@ -222,6 +222,10 @@ def fetch_announcement_text(detail_url: str, title: str) -> Optional[str]:
     """
     logger.info(f"Fetching announcement: '{title}' from {detail_url}")
 
+    # 新增逻辑：如果标题包含"摘要"则直接返回None
+    if "摘要" in title:
+        logger.info(f"Skipping processing for abstract announcement: {title}")
+        return None
     # Determine if Selenium is needed (e.g., for complex sites like cninfo)
     # You might refine this condition based on the URL patterns
     use_selenium = SELENIUM_AVAILABLE and "cninfo.com.cn" in detail_url

@@ -2,7 +2,7 @@
 import akshare as ak
 import pandas as pd
 from sqlalchemy.orm import sessionmaker
-from db.database import get_engine
+from db.database import get_engine_instance
 from db.models import StockList, Base
 
 def sync_stock_list():
@@ -15,7 +15,7 @@ def sync_stock_list():
     df["industry"] = None
     df["list_date"] = None
 
-    engine = get_engine()
+    engine = get_engine_instance()
     Base.metadata.create_all(engine)  # 确保表存在
     df.to_sql("stock_list", con=engine, if_exists="replace", index=False)
     print(f"✅ 成功同步 {len(df)} 支 A 股股票到 stock_list 表")

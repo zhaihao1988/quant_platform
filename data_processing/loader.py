@@ -1,13 +1,14 @@
 # data_processing/loader.py
 import logging
 import pandas as pd
-from sqlalchemy import text, or_
+from sqlalchemy import text, or_, and_, not_
 from sqlalchemy.orm import Session
 from typing import List, Dict, Optional, Any
+from datetime import datetime, timedelta
 
 # Use correct path for models and database session
-from database.models import StockDisclosure, StockDaily, StockFinancial
-from database.database import get_engine_instance # Use engine instance for pandas
+from db.models import StockDisclosure, StockDaily, StockFinancial
+from db.database import get_engine_instance  # Use engine instance for pandas
 
 logger = logging.getLogger(__name__)
 engine = get_engine_instance()
@@ -58,10 +59,10 @@ def load_financial_data(symbol: str, report_type: str) -> Optional[Dict[str, Any
     try:
         # Ensure correct parameter binding
         with engine.connect() as connection:
-             df = pd.read_sql(sql, connection, params={"symbol": symbol, "rtype": report_type})
+            df = pd.read_sql(sql, connection, params={"symbol": symbol, "rtype": report_type})
         if df.empty or 'data' not in df.columns or df['data'].iloc[0] is None:
-             logger.warning(f"No financial data found for symbol {symbol}, report_type '{report_type}'.")
-             return None
+            logger.warning(f"No financial data found for symbol {symbol}, report_type '{report_type}'.")
+            return None
         # Assuming the 'data' column stores JSON
         return df["data"].iloc[0]
     except Exception as e:
@@ -75,15 +76,33 @@ def get_disclosures_needing_content(db: Session, symbol: str) -> List[StockDiscl
     """
     logger.info(f"Querying database for disclosures needing content for symbol: {symbol}")
     try:
-        # Build the filter for keywords using OR condition
-        keyword_filters = [StockDisclosure.title.ilike(f'%{keyword}%') for keyword in DISCLOSURE_KEYWORDS]
+        # Split keywords into time-sensitive and non-time-sensitive
+        non_time_keywords = ['年度报告', '半年度报告']
+        time_keywords = ['调研', '股权激励', '回购']
+        one_year_ago = datetime.now() - timedelta(days=365)
 
-        # Query disclosures where raw_content is NULL and title matches keywords
+        # Build filters for non-time-sensitive keywords
+        non_time_filters = [StockDisclosure.title.ilike(f'%{kw}%') for kw in non_time_keywords]
+
+        # Build filters for time-sensitive keywords with date constraint
+        time_filters = [
+            and_(
+                StockDisclosure.title.ilike(f'%{kw}%'),
+                StockDisclosure.ann_date >= one_year_ago
+            )
+            for kw in time_keywords
+        ]
+
+        # Combine all filters with OR
+        combined_filters = or_(*(non_time_filters + time_filters))
+
+        # Query disclosures with all conditions
         disclosures = db.query(StockDisclosure).filter(
             StockDisclosure.symbol == symbol,
-            StockDisclosure.raw_content == None, # Check if content is missing
-            or_(*keyword_filters) # Apply keyword matching
-        ).order_by(StockDisclosure.ann_date.desc()).all() # Process recent ones first
+            StockDisclosure.raw_content == None,
+            not_(StockDisclosure.title.ilike('%摘要%')),
+            combined_filters
+        ).order_by(StockDisclosure.ann_date.desc()).all()
 
         logger.info(f"Found {len(disclosures)} disclosures needing content for {symbol}.")
         return disclosures

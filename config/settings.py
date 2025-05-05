@@ -5,7 +5,7 @@ from typing import Optional
 
 class Settings(BaseSettings):
     # ---------- 数据库 ----------
-    DB_URL: str = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
+    DB_URL: str = os.getenv("DB_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
 
     # ---------- Ollama 相关 ----------
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen3:14b") # Example model

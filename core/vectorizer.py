@@ -1,7 +1,7 @@
 # core/vectorizer.py
 import logging
 from sentence_transformers import SentenceTransformer
-from config import settings # Import settings
+from config.settings import settings # Import settings
 
 logger = logging.getLogger(__name__)
 

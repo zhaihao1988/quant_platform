@@ -3,6 +3,7 @@ import argparse
 import logging
 import time
 import os
+import random
 from sqlalchemy.orm import Session
 
 # --- Project Modules ---
@@ -11,7 +12,7 @@ from db import crud # Import crud module
 from data_processing import loader, scraper # Import loader and scraper
 from core import vectorizer, prompting # Import vectorizer and prompting
 from integrations import email_sender
-from config import settings # Import settings for report path and email recipient
+from config.settings import settings # Import settings for report path and email recipient
 
 # --- Basic Logging Setup ---
 # Configure logging level, format, and output (e.g., file and console)
