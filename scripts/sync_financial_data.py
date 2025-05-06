@@ -6,7 +6,7 @@ import akshare as ak
 import pandas as pd
 from sqlalchemy.orm import sessionmaker
 from db.database import get_engine_instance
-from scripts.init_db import Base, StockFinancial
+from db.models import Base, StockFinancial
 
 # 数据库引擎和会话
 engine = get_engine_instance()

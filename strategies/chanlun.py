@@ -1,6 +1,13 @@
+# strategies/chanlun.py
 import pandas as pd
 import numpy as np
-import talib
+# Ensure TA-Lib is installed correctly before uncommenting/using
+try:
+    import talib
+    TALIB_AVAILABLE = True
+except ImportError:
+    print("Warning: TA-Lib library not found. MACD divergence detection will be skipped.")
+    TALIB_AVAILABLE = False
 
 
 # Helper class for KLine, Fractal, Stroke, Segment, Pivot
@@ -33,10 +40,17 @@ class Stroke:
         self.start_price = start_fractal.price
         self.end_price = end_fractal.price
         self.type = "up" if start_fractal.fractal_type == "bottom" else "down"
-        self.high = max(
-            k.high for k in processed_k_lines[start_fractal.index_in_processed_k: end_fractal.index_in_processed_k + 1])
-        self.low = min(
-            k.low for k in processed_k_lines[start_fractal.index_in_processed_k: end_fractal.index_in_processed_k + 1])
+        # Ensure indices are valid before slicing
+        start_idx = max(0, start_fractal.index_in_processed_k)
+        end_idx = min(len(processed_k_lines), end_fractal.index_in_processed_k + 1)
+        if start_idx >= end_idx: # Handle edge case where indices are invalid
+             self.high = max(start_fractal.kline.high, end_fractal.kline.high)
+             self.low = min(start_fractal.kline.low, end_fractal.kline.low)
+        else:
+             relevant_klines = processed_k_lines[start_idx:end_idx]
+             self.high = max(k.high for k in relevant_klines) if relevant_klines else max(start_fractal.kline.high, end_fractal.kline.high)
+             self.low = min(k.low for k in relevant_klines) if relevant_klines else min(start_fractal.kline.low, end_fractal.kline.low)
+
         # Store indices for MACD calculation later
         self.start_kline_original_idx = start_fractal.kline.index_in_df
         self.end_kline_original_idx = end_fractal.kline.index_in_df
@@ -44,111 +58,127 @@ class Stroke:
 
 class Segment:
     def __init__(self, strokes, segment_type):  # segment_type: "up" or "down"
+        if not strokes:
+            raise ValueError("Cannot create a segment with zero strokes.")
         self.strokes = strokes
         self.segment_type = segment_type
-        self.start_date = strokes.start_date
+        self.start_date = strokes[0].start_date
         self.end_date = strokes[-1].end_date
-        self.start_price = strokes.start_price
+        self.start_price = strokes[0].start_price
         self.end_price = strokes[-1].end_price
         self.high = max(s.high for s in strokes)
         self.low = min(s.low for s in strokes)
-        self.start_kline_original_idx = strokes.start_kline_original_idx
+        self.start_kline_original_idx = strokes[0].start_kline_original_idx
         self.end_kline_original_idx = strokes[-1].end_kline_original_idx
 
 
 class Pivot:  # Zhongshu
     def __init__(self, strokes_in_pivot, zg, zd, start_date, end_date):
+        if not strokes_in_pivot:
+            raise ValueError("Cannot create a pivot with zero strokes.")
         self.strokes_in_pivot = strokes_in_pivot
         self.zg = zg  # Pivot High
         self.zd = zd  # Pivot Low
         self.start_date = start_date
         self.end_date = end_date
-        self.start_kline_original_idx = strokes_in_pivot.start_kline_original_idx
+        self.start_kline_original_idx = strokes_in_pivot[0].start_kline_original_idx
         self.end_kline_original_idx = strokes_in_pivot[-1].end_kline_original_idx
 
 
 ### A. K线预处理函数 (`preprocess_k_lines`)
-# (包含关系处理)
 def preprocess_k_lines(df_raw):
     """
     Processes raw K-lines to handle inclusion relationships.
     Outputs a list of KLine objects.
     """
-    processed_k_lines =
+    processed_k_lines = [] # Corrected initialization
     if df_raw is None or len(df_raw) < 1:
+        print("Warning: Empty or None DataFrame passed to preprocess_k_lines.")
         return processed_k_lines
 
     # Convert DataFrame rows to KLine objects for easier manipulation
     # Store original index for later reference (e.g. MACD)
-    klines_raw_obj = [KLine(row.Index, row.open, row.high, row.low, row.close, idx)
-                      for idx, row in enumerate(df_raw.itertuples())]
+    # Ensure df_raw has expected columns: open, high, low, close
+    expected_cols = {'open', 'high', 'low', 'close'}
+    if not expected_cols.issubset(df_raw.columns):
+        print(f"Error: Input DataFrame missing required columns. Expected: {expected_cols}, Got: {df_raw.columns}")
+        return processed_k_lines
+
+    klines_raw_obj = []
+    for idx, row in enumerate(df_raw.itertuples()):
+        # Check for NaN values before creating KLine object
+        if pd.isna(row.open) or pd.isna(row.high) or pd.isna(row.low) or pd.isna(row.close):
+            print(f"Warning: Skipping row index {idx} due to NaN values.")
+            continue
+        klines_raw_obj.append(KLine(row.Index, row.open, row.high, row.low, row.close, idx))
+
 
     if not klines_raw_obj:
-        return
+        print("Warning: No valid KLine objects created from DataFrame.")
+        return processed_k_lines # Return empty list
 
-    current_k = klines_raw_obj
+    # --- Inclusion Logic ---
+    # This logic requires careful handling of indices and merging.
+    # The original implementation had potential issues with direction determination
+    # and how merged K-lines represent the underlying data.
+    # A simpler, often effective approach is iterative merging:
+
+    merged_klines = []
+    if not klines_raw_obj:
+        return merged_klines
+
+    k_prev = klines_raw_obj[0]
 
     for i in range(1, len(klines_raw_obj)):
-        next_k = klines_raw_obj[i]
+        k_curr = klines_raw_obj[i]
 
-        # Check for inclusion: next_k is included in current_k
-        if next_k.high <= current_k.high and next_k.low >= current_k.low:
-            # Determine direction based on current_k vs previous actual kline (if exists)
-            # For simplicity in this example, we'll use current_k's own direction
-            # A more robust method would compare current_k with the last *processed_k_lines[-1]* if available
-            # or its actual predecessor if current_k is the first in a merge sequence.
+        # Check for inclusion: k_curr included in k_prev
+        if k_curr.high <= k_prev.high and k_curr.low >= k_prev.low:
+            # Determine direction based on k_prev vs its predecessor (if available)
+            # Simplified: Use k_prev's direction or the trend leading to k_prev
+            direction = k_prev.direction
+            if direction == 0 and merged_klines: # Use previous merged k-line direction if k_prev is doji
+                direction = merged_klines[-1].direction
+            if direction == 0: # Still zero? Default to upward bias or based on price relation
+                 direction = 1 if k_prev.close >= klines_raw_obj[i-1].close else -1 # Compare to actual previous
 
-            # Simplified direction: if current_k is bullish, trend is up, else down.
-            # This simplification might need refinement based on strict Chan Lun rules for direction.
-            # [49]: "若2比1高则取向上包含；若2比1低则取向下包含."
-            # This implies comparing the K-line *initiating* the inclusion processing with its predecessor.
-            # For this implementation, we use the first K-line's (current_k) direction in a sequence of inclusions.
+            if direction >= 0: # Upward trend or neutral, merge upwards
+                k_prev = KLine(k_prev.date, k_prev.open, max(k_prev.high, k_curr.high), max(k_prev.low, k_curr.low), k_curr.close, k_prev.index_in_df)
+            else: # Downward trend, merge downwards
+                k_prev = KLine(k_prev.date, k_prev.open, min(k_prev.high, k_curr.high), min(k_prev.low, k_curr.low), k_curr.close, k_prev.index_in_df)
+            # k_prev absorbs k_curr
 
-            if not processed_k_lines:  # If current_k is the first k-line being processed
-                direction_for_merge = 1 if current_k.close > current_k.open else -1  # Default to current_k's direction
-            else:
-                # Compare current_k to the last *committed* processed K-line
-                # This is a proxy for the "K_i vs K_{i-1}" comparison
-                prev_committed_k = processed_k_lines[-1]
-                if current_k.high > prev_committed_k.high and current_k.low > prev_committed_k.low:
-                    direction_for_merge = 1  # Upward
-                elif current_k.high < prev_committed_k.high and current_k.low < prev_committed_k.low:
-                    direction_for_merge = -1  # Downward
-                else:  # Mixed or equal, use current_k's own direction or previous direction
-                    direction_for_merge = current_k.direction if current_k.direction != 0 else (
-                        1 if processed_k_lines[-1].direction >= 0 else -1)
+        # Check for inclusion: k_prev included in k_curr
+        elif k_prev.high <= k_curr.high and k_prev.low >= k_curr.low:
+            # Determine direction based on k_curr vs k_prev
+            direction = k_curr.direction
+            if direction == 0: # Use k_prev's direction if k_curr is doji
+                 direction = k_prev.direction
+            if direction == 0 and merged_klines: # Still zero? Use previous merged
+                 direction = merged_klines[-1].direction
+            if direction == 0: # Still zero? Default
+                 direction = 1 if k_curr.close >= k_prev.close else -1
 
-            if direction_for_merge == 1:  # Upward inclusion
-                current_k.high = max(current_k.high, next_k.high)
-                current_k.low = max(current_k.low, next_k.low)  # Per [49] "低点最高为低点"
-            else:  # Downward inclusion or neutral (treat as downward)
-                current_k.high = min(current_k.high, next_k.high)  # Per [49] "高点最低为高点"
-                current_k.low = min(current_k.low, next_k.low)
-            # Update date to the later K-line if merging. Chan Lun usually keeps the start date of the dominant K-line.
-            # For simplicity, we keep current_k's date and original index.
-            # The end K-line's information (next_k) is absorbed.
-            current_k.close = next_k.close  # Take the close of the last k-line in the inclusion sequence
-            current_k.open = current_k.open  # Keep the open of the first k-line in the inclusion sequence
+            if direction >= 0: # Upward trend or neutral
+                 k_prev = KLine(k_prev.date, k_prev.open, max(k_prev.high, k_curr.high), max(k_prev.low, k_curr.low), k_curr.close, k_prev.index_in_df)
+            else: # Downward trend
+                 k_prev = KLine(k_prev.date, k_prev.open, min(k_prev.high, k_curr.high), min(k_prev.low, k_curr.low), k_curr.close, k_prev.index_in_df)
+            # k_prev is effectively replaced by a merged version dominated by k_curr's range but keeping start info
 
-        # Check for inclusion: current_k is included in next_k
-        elif current_k.high <= next_k.high and current_k.low >= next_k.low:
-            # next_k becomes the new current_k
-            current_k = KLine(next_k.date, next_k.open, next_k.high, next_k.low, next_k.close, next_k.index_in_df)
-            # Direction for merge would be determined by next_k vs current_k (as K_{i-1})
-            # This case is less common in sequential processing if strictly following "merge K_i with K_{i+1}"
-            # For this implementation, if K_i is swallowed by K_{i+1}, K_{i+1} effectively replaces K_i.
         else:
-            # No inclusion, current_k is finalized
-            processed_k_lines.append(current_k)
-            current_k = next_k  # Move to the next k-line
+            # No inclusion, finalize k_prev and move to k_curr
+            merged_klines.append(k_prev)
+            k_prev = k_curr
 
-    processed_k_lines.append(current_k)  # Add the last k-line
-    return processed_k_lines
+    merged_klines.append(k_prev) # Add the last processed k-line
+
+    print(f"Preprocessed K-lines: {len(merged_klines)}")
+    return merged_klines
 
 
 ### B. 分型识别函数 (`identify_fractals`)
 def identify_fractals(processed_k_lines):
-    fractals =
+    fractals = [] # Corrected initialization
     if len(processed_k_lines) < 3:
         return fractals
 
@@ -157,413 +187,298 @@ def identify_fractals(processed_k_lines):
         k2 = processed_k_lines[i]
         k3 = processed_k_lines[i + 1]
 
-        # Top Fractal
-        is_top_fractal = (k2.high >= k1.high and k2.high >= k3.high and
-                          k2.low >= k1.low and k2.low >= k3.low)
-        # Ensure k2 is strictly higher than at least one neighbor if they have same highs
-        # or ensure it's a clear peak.
-        # A common stricter rule: k2.high > k1.high and k2.high > k3.high
-        # For this implementation, we use the definition from [51]/[51]: highest high AND highest low.
-        if is_top_fractal:
-            # Check for strictness: if k2.high == k1.high, then k2.low must be > k1.low (or k1 is part of an earlier top)
-            # if k2.high == k3.high, then k2.low must be > k3.low (or k3 is part of a later top)
-            # This avoids flat tops being multiple fractals. For simplicity, the above definition is used.
-            # Chan Lun's core definition from snippets is usually sufficient.
-            fractals.append(Fractal(k2, "top", i))
+        # Top Fractal Check (k2 is highest high AND highest low of the three)
+        is_top_fractal = k2.high >= k1.high and k2.high >= k3.high and \
+                         k2.low >= k1.low and k2.low >= k3.low
 
-        # Bottom Fractal
-        is_bottom_fractal = (k2.low <= k1.low and k2.low <= k3.low and
-                             k2.high <= k1.high and k2.high <= k3.high)
-        # Similar strictness consideration for bottoms.
-        if is_bottom_fractal:
-            fractals.append(Fractal(k2, "bottom", i))
+        # Stricter check: ensure it's a real peak if highs are equal
+        if is_top_fractal and (k2.high > k1.high or k2.high > k3.high or (k2.high == k1.high and k2.low > k1.low) or (k2.high == k3.high and k2.low > k3.low)):
+             # Check if this fractal is too close to the previous one of the same type
+             is_valid = True
+             if fractals and fractals[-1].fractal_type == "top":
+                  # Avoid adding if it's essentially the same peak (e.g., index difference < 3)
+                  if abs(i - fractals[-1].index_in_processed_k) < 3:
+                       # Replace previous if current is higher
+                       if k2.high > fractals[-1].price:
+                            fractals[-1] = Fractal(k2, "top", i)
+                       is_valid = False # Don't add as a new one
+             if is_valid:
+                  fractals.append(Fractal(k2, "top", i))
 
+
+        # Bottom Fractal Check (k2 is lowest low AND lowest high of the three)
+        is_bottom_fractal = k2.low <= k1.low and k2.low <= k3.low and \
+                            k2.high <= k1.high and k2.high <= k3.high
+
+        # Stricter check for real valley
+        if is_bottom_fractal and (k2.low < k1.low or k2.low < k3.low or (k2.low == k1.low and k2.high < k1.high) or (k2.low == k3.low and k2.high < k3.high)):
+             is_valid = True
+             if fractals and fractals[-1].fractal_type == "bottom":
+                  if abs(i - fractals[-1].index_in_processed_k) < 3:
+                       if k2.low < fractals[-1].price:
+                            fractals[-1] = Fractal(k2, "bottom", i)
+                       is_valid = False
+             if is_valid:
+                  fractals.append(Fractal(k2, "bottom", i))
+
+    print(f"Identified fractals: {len(fractals)}")
     return fractals
 
 
 ### C. 笔构建函数 (`construct_strokes`)
 def construct_strokes(fractals, processed_k_lines):
-    strokes =
+    strokes = [] # Corrected initialization
     if len(fractals) < 2:
         return strokes
 
-    last_confirmed_fractal = None
-    potential_stroke_start_fractal = fractals
+    last_confirmed_stroke_end_fractal = None
+    potential_stroke_start_fractal = None
 
-    for i in range(1, len(fractals)):
-        current_fractal = fractals[i]
+    f_idx = 0
+    while f_idx < len(fractals):
+        current_fractal = fractals[f_idx]
+
+        if potential_stroke_start_fractal is None:
+            potential_stroke_start_fractal = current_fractal
+            f_idx += 1
+            continue
 
         # Ensure alternating fractal types
         if current_fractal.fractal_type == potential_stroke_start_fractal.fractal_type:
             # If same type, choose the "better" one (higher top, lower bottom)
-            if current_fractal.fractal_type == "top" and current_fractal.price > potential_stroke_start_fractal.price:
+            if (current_fractal.fractal_type == "top" and current_fractal.price > potential_stroke_start_fractal.price) or \
+               (current_fractal.fractal_type == "bottom" and current_fractal.price < potential_stroke_start_fractal.price):
                 potential_stroke_start_fractal = current_fractal
-            elif current_fractal.fractal_type == "bottom" and current_fractal.price < potential_stroke_start_fractal.price:
-                potential_stroke_start_fractal = current_fractal
+            f_idx += 1
             continue
 
-        # Check K-line separation rule: at least 1 K-line between fractal K-lines
-        # The fractals are k2 of (k1,k2,k3). So index_in_processed_k is the index of k2.
-        # The K-lines of the start fractal are from index_in_processed_k-1 to index_in_processed_k+1
-        # The K-lines of the end fractal are from current_fractal.index_in_processed_k-1 to current_fractal.index_in_processed_k+1
-        # Number of K-lines between the two middle K-lines of the fractals:
-        # (current_fractal.index_in_processed_k - 1) - (potential_stroke_start_fractal.index_in_processed_k + 1) + 1
-        # = current_fractal.index_in_processed_k - potential_stroke_start_fractal.index_in_processed_k - 1
-        # This count is for K-lines strictly *between* the two fractals' K-lines.
-        # Chan Lun rule: "顶和底之间至少有一个K线不属于顶分型与底分型" [49]
-        # This means the K-lines that form the fractals themselves are excluded.
-        # The distance between the middle K-lines of the fractals must be >= 3
-        # (e.g., F1_k2 at index i, F2_k2 at index j. K-lines between are i+1 to j-1. Count is (j-1)-(i+1)+1 = j-i-1. Need j-i-1 >= 1, so j-i >= 2.
-        # But the fractals themselves are 3 K-lines. A more common interpretation is simply that the fractals' constituent K-lines don't overlap and there's at least one K-line between the end of the first fractal's 3-K-line pattern and the start of the second fractal's 3-K-line pattern.
-        # A simpler check: distance between the indices of the middle K-lines of the fractals.
-        # If F1 is at index `a` and F2 is at index `b`, then `b - a` must be at least 3 for one K-line between them.
-        # (e.g., F1 is k_i, k_{i+1}, k_{i+2} with k_{i+1} as center. F2 is k_j, k_{j+1}, k_{j+2} with k_{j+1} as center)
-        # We need k_{i+2} and k_j to be separated by at least one K-line.
-        # So, index of k_j must be >= index of k_{i+2} + 2.
-        # index_k_j = current_fractal.index_in_processed_k -1
-        # index_k_i_plus_2 = potential_stroke_start_fractal.index_in_processed_k + 1
-        # (current_fractal.index_in_processed_k -1) >= (potential_stroke_start_fractal.index_in_processed_k + 1) + 2
-        # current_fractal.index_in_processed_k - potential_stroke_start_fractal.index_in_processed_k >= 4
+        # Check K-line separation rule: >= 3 bars between fractal centers
+        k_line_distance = abs(current_fractal.index_in_processed_k - potential_stroke_start_fractal.index_in_processed_k)
+        if k_line_distance < 3:
+            # Too close, potentially invalidates the earlier fractal or requires merging.
+            # Simplified: Skip this pair for now, reset potential start
+            # A more complex rule might try to merge or select the dominant fractal.
+            # print(f"Debug: Fractals too close at indices {potential_stroke_start_fractal.index_in_processed_k} and {current_fractal.index_in_processed_k}. Resetting potential start.")
+            potential_stroke_start_fractal = current_fractal # Reset potential start
+            f_idx += 1
+            continue
 
-        # Simpler rule: number of K-bars between the two fractal points (inclusive of start, exclusive of end for count)
-        # Number of K-lines between the *central* K-lines of the two fractals.
-        # If start_idx is index of first fractal's central K, end_idx is for second.
-        # K-lines between them are start_idx+1 to end_idx-1.
-        # Count = (end_idx-1) - (start_idx+1) + 1 = end_idx - start_idx - 1.
-        # This must be >= 1. So, end_idx - start_idx >= 2.
-        # The definition of "at least one independent K-line" [50] is key.
-        # This means the K-lines *between* the 3-bar fractal patterns.
-        # If fractal 1 ends at k_idx_f1_end and fractal 2 starts at k_idx_f2_start,
-        # we need k_idx_f2_start - k_idx_f1_end -1 >= 1.
-        # k_idx_f1_end = potential_stroke_start_fractal.index_in_processed_k + 1
-        # k_idx_f2_start = current_fractal.index_in_processed_k - 1
-        # (current_fractal.index_in_processed_k - 1) - (potential_stroke_start_fractal.index_in_processed_k + 1) - 1 >= 1
-        # current_fractal.index_in_processed_k - potential_stroke_start_fractal.index_in_processed_k - 3 >= 1
-        # current_fractal.index_in_processed_k - potential_stroke_start_fractal.index_in_processed_k >= 4
+        # Check stroke integrity: Top's high > Bottom's high, Bottom's low < Top's low
+        # This was slightly off in the original logic. It should compare the *prices* of the fractals.
+        valid_stroke_integrity = False
+        if potential_stroke_start_fractal.fractal_type == "bottom" and current_fractal.fractal_type == "top":
+            # Up-stroke: Current top fractal price must be higher than potential start bottom fractal price
+            if current_fractal.price > potential_stroke_start_fractal.price:
+                valid_stroke_integrity = True
+        elif potential_stroke_start_fractal.fractal_type == "top" and current_fractal.fractal_type == "bottom":
+            # Down-stroke: Current bottom fractal price must be lower than potential start top fractal price
+            if current_fractal.price < potential_stroke_start_fractal.price:
+                valid_stroke_integrity = True
 
-        k_lines_between_fractal_centers = current_fractal.index_in_processed_k - potential_stroke_start_fractal.index_in_processed_k - 1
-        if k_lines_between_fractal_centers < 1:  # This means centers are too close (e.g. index 1 and 2)
-            # If they are too close, we might need to update the potential_stroke_start_fractal
-            # if the current_fractal is "better" (e.g. higher top, lower bottom)
-            # This logic is complex. For now, we assume distinct fractals are far enough.
-            # A common interpretation is that the indices of the middle K-lines of the fractals must differ by at least 2.
-            # (i.e., current_fractal.index_in_processed_k - potential_stroke_start_fractal.index_in_processed_k >= 2)
-            # Let's use a more direct interpretation of "at least one K-line between the fractals"
-            # The fractals are 3 K-lines each.
-            # End of first fractal pattern: potential_stroke_start_fractal.index_in_processed_k + 1
-            # Start of second fractal pattern: current_fractal.index_in_processed_k - 1
-            # We need (current_fractal.index_in_processed_k - 1) > (potential_stroke_start_fractal.index_in_processed_k + 1)
-            # So, current_fractal.index_in_processed_k - potential_stroke_start_fractal.index_in_processed_k > 2
-            # i.e. current_fractal.index_in_processed_k - potential_stroke_start_fractal.index_in_processed_k >= 3
-            pass  # This condition is implicitly handled by fractal identification if they are truly distinct.
-            # The key is that the fractals should not share K-lines.
-            # The number of K-lines from start of first fractal to end of second fractal must be >= 5 (3 for first, 1 between, 3 for second, minus overlaps)
-            # A simpler rule: the gap between the end of the first fractal's K-lines and start of second fractal's K-lines.
-            # If F1 is (k_i, k_{i+1}, k_{i+2}) and F2 is (k_j, k_{j+1}, k_{j+2})
-            # We need j > i+2.
-            # index of k_j is current_fractal.index_in_processed_k - 1
-            # index of k_{i+2} is potential_stroke_start_fractal.index_in_processed_k + 1
-            # So, (current_fractal.index_in_processed_k - 1) > (potential_stroke_start_fractal.index_in_processed_k + 1)
-            # current_fractal.index_in_processed_k - potential_stroke_start_fractal.index_in_processed_k > 2 (i.e. >=3)
-
-        if not (current_fractal.index_in_processed_k - potential_stroke_start_fractal.index_in_processed_k >= 3):
-            # Fractals are too close, or overlapping.
-            # This implies the earlier fractal might not be valid in context of this new one, or vice-versa.
-            # Chan Lun rules for this can be complex (e.g., choosing the "stronger" fractal).
-            # For now, if too close, we might update the starting fractal if the current one is "better"
-            if current_fractal.fractal_type == "top" and current_fractal.price > potential_stroke_start_fractal.price and potential_stroke_start_fractal.fractal_type == "top":
-                potential_stroke_start_fractal = current_fractal
-            elif current_fractal.fractal_type == "bottom" and current_fractal.price < potential_stroke_start_fractal.price and potential_stroke_start_fractal.fractal_type == "bottom":
-                potential_stroke_start_fractal = current_fractal
-            # If types are different but too close, this configuration is usually invalid for a stroke.
-            # We might need to discard `potential_stroke_start_fractal` and make `current_fractal` the new potential start.
-            # Or, if current_fractal is of the same type as a previous confirmed stroke's end, it might invalidate that stroke.
-            # This part of Chan Lun (笔的连接与确认) is subtle.
-            # A common simplification: if a new fractal forms that would invalidate a pending stroke, the pending stroke is cancelled.
-            # If they are alternating and too close, it's often not a valid stroke.
-            # Let's assume for now that our fractal list is "clean" enough that alternating types imply sufficient separation.
-            # The ">=" 3 rule is a good heuristic for K-line separation.
-            if not (current_fractal.fractal_type != potential_stroke_start_fractal.fractal_type and \
-                    abs(current_fractal.index_in_processed_k - potential_stroke_start_fractal.index_in_processed_k) >= 3):  # Min 3 K-line diff for centers
-                # If same type, update potential_stroke_start_fractal if current is stronger
-                if current_fractal.fractal_type == potential_stroke_start_fractal.fractal_type:
-                    if (
-                            current_fractal.fractal_type == "top" and current_fractal.price > potential_stroke_start_fractal.price) or \
-                            (
-                                    current_fractal.fractal_type == "bottom" and current_fractal.price < potential_stroke_start_fractal.price):
-                        potential_stroke_start_fractal = current_fractal
-                # If different type but too close, this is tricky.
-                # It might mean the first fractal was not a true turning point for a stroke.
-                # Or the current fractal is part of a smaller oscillation.
-                # For simplicity, if they are alternating but too close, we update the start fractal
-                # to the current one, effectively discarding the previous potential start.
-                else:  # Different types, but too close
-                    potential_stroke_start_fractal = current_fractal
-                continue
-
-        # Check fractal integrity (Rule 2 from outline)
-        valid_stroke = False
-        if potential_stroke_start_fractal.fractal_type == "bottom" and current_fractal.fractal_type == "top":  # Up-stroke
-            if current_fractal.price > potential_stroke_start_fractal.price:  # Top fractal high > Bottom fractal high (this is not the rule)
-                # Rule: Top fractal's high > Bottom fractal's high (price of fractal)
-                valid_stroke = True
-        elif potential_stroke_start_fractal.fractal_type == "top" and current_fractal.fractal_type == "bottom":  # Down-stroke
-            if current_fractal.price < potential_stroke_start_fractal.price:  # Bottom fractal low < Top fractal low
-                valid_stroke = True
-
-        if valid_stroke:
-            # Check if this new stroke conflicts with the last confirmed stroke (if any)
-            # A new stroke must start from the end of the last confirmed stroke.
+        if valid_stroke_integrity:
+            # Create the potential stroke
             new_stroke = Stroke(potential_stroke_start_fractal, current_fractal, processed_k_lines)
 
-            if not strokes:  # First stroke
+            # Stroke Confirmation Logic (Simplified - needs refinement based on Chan rules)
+            # Check if it connects to the last confirmed stroke
+            if not strokes or \
+               (new_stroke.start_fractal.index_in_processed_k == strokes[-1].end_fractal.index_in_processed_k and \
+                new_stroke.type != strokes[-1].type):
+                # This stroke is potentially valid, add it for now
                 strokes.append(new_stroke)
-                last_confirmed_fractal = new_stroke.end_fractal
-                potential_stroke_start_fractal = new_stroke.end_fractal  # Next stroke starts from here
+                last_confirmed_stroke_end_fractal = new_stroke.end_fractal
+                potential_stroke_start_fractal = new_stroke.end_fractal # Next potential stroke starts here
             else:
+                # Conflict or gap. This part needs robust Chan Lun rules for combination/destruction.
+                # Simple approach: if the new fractal is "better" than the end of the last stroke,
+                # potentially invalidate the last stroke and try forming a new one.
                 last_stroke = strokes[-1]
-                # Ensure new stroke starts where the last one ended and alternates type
-                if new_stroke.start_fractal.date == last_stroke.end_fractal.date and \
-                        new_stroke.start_fractal.price == last_stroke.end_fractal.price and \
-                        new_stroke.type != last_stroke.type:
-                    strokes.append(new_stroke)
-                    last_confirmed_fractal = new_stroke.end_fractal
-                    potential_stroke_start_fractal = new_stroke.end_fractal
-                else:
-                    # Conflict: this new fractal might invalidate the last stroke or start a new sequence
-                    # This is where Chan Lun's stroke combination rules get complex.
-                    # E.g., if a new fractal forms that is "stronger" than the end of the last stroke.
-                    # For this version, we assume a simpler sequential confirmation.
-                    # If it doesn't connect, we see if the current_fractal is a better endpoint for the last stroke
-                    # or if potential_stroke_start_fractal should be updated.
+                if current_fractal.fractal_type == last_stroke.end_fractal.fractal_type:
+                     if (current_fractal.fractal_type == "top" and current_fractal.price > last_stroke.end_fractal.price) or \
+                        (current_fractal.fractal_type == "bottom" and current_fractal.price < last_stroke.end_fractal.price):
+                          # Last stroke is invalidated/updated
+                          print(f"Debug: Updating last stroke ending at {last_stroke.end_date} with new fractal at {current_fractal.date}")
+                          strokes.pop() # Remove last stroke
+                          # Restart the process from the fractal before the invalidated stroke's start
+                          # This requires better state management or backtracking.
+                          # Simplified reset:
+                          potential_stroke_start_fractal = current_fractal
+                     else: # Not better, just reset potential start
+                          potential_stroke_start_fractal = current_fractal
+                else: # Doesn't connect and type is different - likely a gap or complex situation
+                     potential_stroke_start_fractal = current_fractal # Reset
 
-                    # If the current_fractal is of the same type as last_stroke.end_fractal but "better"
-                    if current_fractal.fractal_type == last_stroke.end_fractal.fractal_type:
-                        if (
-                                current_fractal.fractal_type == "top" and current_fractal.price > last_stroke.end_fractal.price) or \
-                                (
-                                        current_fractal.fractal_type == "bottom" and current_fractal.price < last_stroke.end_fractal.price):
-                            # Try to form a new stroke from last_stroke.start_fractal to current_fractal
-                            # This means the last_stroke is "updated"
-                            updated_last_stroke = Stroke(last_stroke.start_fractal, current_fractal, processed_k_lines)
-                            if updated_last_stroke.type == last_stroke.type:  # Must be same direction
-                                strokes[-1] = updated_last_stroke
-                                last_confirmed_fractal = updated_last_stroke.end_fractal
-                                potential_stroke_start_fractal = updated_last_stroke.end_fractal
-                            else:  # Should not happen if types are same
-                                potential_stroke_start_fractal = current_fractal  # Reset
-                        else:  # Not better, current fractal might start a new sequence or be ignored
-                            potential_stroke_start_fractal = current_fractal
-                    else:  # Different type, but doesn't connect to last_stroke.end_fractal
-                        # This means the potential_stroke_start_fractal was not last_stroke.end_fractal
-                        # This implies a break in sequence or a need to re-evaluate previous strokes.
-                        # For simplicity, we reset potential_stroke_start_fractal
-                        potential_stroke_start_fractal = current_fractal
+            f_idx += 1 # Move to next fractal
 
-
-        else:  # Not a valid stroke (e.g. integrity rule failed)
-            # If current fractal is "stronger" than potential_stroke_start_fractal and same type, update start
+        else: # Integrity failed
+            # If the current fractal is stronger than the potential start (and same type), update potential start
             if current_fractal.fractal_type == potential_stroke_start_fractal.fractal_type:
-                if (
-                        current_fractal.fractal_type == "top" and current_fractal.price > potential_stroke_start_fractal.price) or \
-                        (
-                                current_fractal.fractal_type == "bottom" and current_fractal.price < potential_stroke_start_fractal.price):
+                if (current_fractal.fractal_type == "top" and current_fractal.price > potential_stroke_start_fractal.price) or \
+                   (current_fractal.fractal_type == "bottom" and current_fractal.price < potential_stroke_start_fractal.price):
                     potential_stroke_start_fractal = current_fractal
-            # If different type, this current_fractal becomes the new potential_stroke_start_fractal
-            # because the previous one couldn't form a valid stroke with it.
             else:
-                potential_stroke_start_fractal = current_fractal
+                 # Different type, but failed integrity. Reset potential start to current.
+                 potential_stroke_start_fractal = current_fractal
+            f_idx += 1
 
-    # Refine strokes: Ensure no overlapping K-lines between strokes and strict alternation
-    # This is a complex part of Chan theory, often involving iterative refinement.
-    # A common issue is that a new fractal might invalidate a previously confirmed stroke.
-    # The above loop is a greedy approach. A more robust method might involve backtracking or a state machine.
-
-    # Simple post-processing for strict alternation if greedy approach failed
-    if not strokes: return
-
-    refined_strokes = [strokes]
-    for k in range(1, len(strokes)):
-        prev_s = refined_strokes[-1]
-        curr_s = strokes[k]
-        # Ensure curr_s starts where prev_s ended and types alternate
-        if curr_s.start_fractal.date == prev_s.end_fractal.date and \
-                curr_s.start_fractal.price == prev_s.end_fractal.price and \
-                curr_s.type != prev_s.type:
-            refined_strokes.append(curr_s)
-        # else: current stroke is invalid in sequence, try to see if it can start a new sequence
-        # from prev_s.start_fractal if it's a "better" end than prev_s.end_fractal
-        # This is complex. For now, just ensure strict connection.
-
-    return refined_strokes
+    # Post-processing refinement (optional but recommended)
+    # E.g., ensure strict alternation, handle stroke destruction rules.
+    # This requires implementing more advanced Chan Lun concepts.
+    print(f"Constructed strokes (initial): {len(strokes)}")
+    return strokes # Return the initially constructed strokes for now
 
 
 ### D. 线段构建函数 (`construct_line_segments`)
-# (简化版，主要基于三笔重叠，未完全实现特征序列破坏)
 def construct_line_segments(strokes):
-    segments =
+    segments = [] # Corrected initialization
     if len(strokes) < 3:
         return segments
 
+    # Simplified logic based on 3-stroke overlap (needs refinement for feature sequence)
     i = 0
     while i <= len(strokes) - 3:
         s1, s2, s3 = strokes[i], strokes[i + 1], strokes[i + 2]
 
-        # Check for basic line segment formation: 3 strokes, s1 and s3 same direction, s2 opposite
+        # Basic check: s1, s3 same direction, s2 opposite
         if s1.type == s3.type and s1.type != s2.type:
-            # Check overlap and progression for an "up" segment (s1 up, s2 down, s3 up)
-            if s1.type == "up":
-                # s2 low should not be below s1 start_price (or s1 low)
-                # s3 end_price should be above s1 end_price (or s1 high)
-                # Overlap: s2 range must overlap with s1 range. s3 range must overlap with s2 range.
-                # A common definition of overlap for segment:
-                # For up-segment (s1 up, s2 down, s3 up):
-                # s2.low > s1.start_price (bottom of s1)
-                # s2.high < s1.end_price (top of s1) -- this is for s2 to be contained, not general overlap
-                # More generally: max(s1.low, s2.low) < min(s1.high, s2.high) for overlap
+            # Check for overlap: max(s1.low, s3.low) < min(s1.high, s3.high)
+            overlap_exists = max(s1.low, s3.low) < min(s1.high, s3.high)
 
-                # Segment condition: s3 must break s1's high
-                # And s2's low must not break s1's low (more strictly, s1's start fractal low)
-                if s3.end_price > s1.end_price and s2.end_price > s1.start_price:  # s2.end_price is bottom of s2
-                    # Potential up-segment: s1, s2, s3
-                    # Look for more strokes to extend this segment
-                    current_segment_strokes = [s1, s2, s3]
-                    j = i + 3
-                    while j < len(strokes) - 1:  # Need at least two more strokes (s_next_opposite, s_next_same_dir)
-                        s_next_opposite = strokes[j]
-                        s_next_same_dir = strokes[j + 1]
+            # Check for segment break: s3 extreme breaks s1 extreme
+            segment_break = False
+            if s1.type == "up" and s3.end_price > s1.end_price:
+                segment_break = True
+            elif s1.type == "down" and s3.end_price < s1.end_price:
+                segment_break = True
 
-                        if s_next_opposite.type == s2.type and s_next_same_dir.type == s1.type:
-                            # Check if s_next_same_dir continues the segment
-                            # (i.e., breaks the high of current_segment_strokes[-1].end_price)
-                            # and s_next_opposite does not break the low of the segment
-                            if s_next_same_dir.end_price > current_segment_strokes[-1].end_price and \
-                                    s_next_opposite.end_price > current_segment_strokes.start_price:  # Simplified check
-                                current_segment_strokes.extend([s_next_opposite, s_next_same_dir])
-                                j += 2
-                            else:  # Segment ends
-                                break
-                        else:  # Pattern broken
-                            break
+            # Check for pullback validity: s2 doesn't break s1 start
+            pullback_valid = False
+            if s1.type == "up" and s2.end_price > s1.start_price: # s2 low > s1 low
+                 pullback_valid = True
+            elif s1.type == "down" and s2.end_price < s1.start_price: # s2 high < s1 high
+                 pullback_valid = True
 
-                    segments.append(Segment(current_segment_strokes, "up"))
-                    i = j  # Move past the consumed strokes for this segment
-                    continue
+            # Combine conditions (Simplified: overlap and break implies potential segment)
+            # More rigorous check needs feature sequence analysis.
+            if overlap_exists and segment_break and pullback_valid:
+                # Potential segment found: s1, s2, s3
+                # Extend segment logic (as in original, simplified)
+                current_segment_strokes = [s1, s2, s3]
+                segment_type = s1.type
+                j = i + 3 # Start checking from the 4th stroke relative to s1
 
-            # Check for "down" segment (s1 down, s2 up, s3 down)
-            elif s1.type == "down":
-                if s3.end_price < s1.end_price and s2.end_price < s1.start_price:  # s2.end_price is top of s2
-                    current_segment_strokes = [s1, s2, s3]
-                    j = i + 3
-                    while j < len(strokes) - 1:
-                        s_next_opposite = strokes[j]
-                        s_next_same_dir = strokes[j + 1]
-                        if s_next_opposite.type == s2.type and s_next_same_dir.type == s1.type:
-                            if s_next_same_dir.end_price < current_segment_strokes[-1].end_price and \
-                                    s_next_opposite.end_price < current_segment_strokes.start_price:  # Simplified
-                                current_segment_strokes.extend([s_next_opposite, s_next_same_dir])
-                                j += 2
-                            else:
-                                break
+                while j < len(strokes) - 1:
+                    s_next_opposite = strokes[j]
+                    s_next_same_dir = strokes[j + 1]
+
+                    # Check if types alternate correctly for extension
+                    if s_next_opposite.type != segment_type and s_next_same_dir.type == segment_type:
+                        # Check extension conditions (simplified: new extreme breaks last extreme)
+                        last_seg_stroke = current_segment_strokes[-1]
+                        extend_break = (segment_type == "up" and s_next_same_dir.end_price > last_seg_stroke.end_price) or \
+                                       (segment_type == "down" and s_next_same_dir.end_price < last_seg_stroke.end_price)
+
+                        # Check pullback validity for extension
+                        extend_pullback_valid = (segment_type == "up" and s_next_opposite.end_price > last_seg_stroke.start_price) or \
+                                                (segment_type == "down" and s_next_opposite.end_price < last_seg_stroke.start_price)
+
+
+                        if extend_break and extend_pullback_valid: # Simplified extension condition
+                            current_segment_strokes.extend([s_next_opposite, s_next_same_dir])
+                            j += 2
                         else:
-                            break
-                    segments.append(Segment(current_segment_strokes, "down"))
-                    i = j
-                    continue
-        i += 1  # If no segment found starting at i, move to next stroke
+                            break # Extension conditions not met
+                    else:
+                        break # Type pattern broken
+
+                segments.append(Segment(current_segment_strokes, segment_type))
+                i = j # Move index past the strokes consumed by the segment
+                continue # Continue searching for the next segment
+
+        i += 1 # Move to the next potential starting stroke
+
+    print(f"Constructed segments: {len(segments)}")
     return segments
 
 
 ### E. 中枢识别函数 (`identify_pivots`)
 def identify_pivots(strokes):
-    pivots =
+    pivots = [] # Corrected initialization
     if len(strokes) < 3:
         return pivots
 
-    # This is a simplified pivot identification based on 3 overlapping strokes.
-    # Chan Lun pivot definition is more nuanced (次级别走势类型, extensions, etc.)
-
-    # Iterate through strokes to find sequences of 3 (or more) that form a pivot
-    # A common way: find first 3 strokes s1, s2, s3. If they overlap, form a pivot.
-    # Then check if s4, s5 extend it, etc.
-
+    # Simplified pivot identification based on 3+ overlapping strokes
     i = 0
     while i <= len(strokes) - 3:
         s1, s2, s3 = strokes[i], strokes[i + 1], strokes[i + 2]
 
-        # Check for alternating types for basic pivot structure
-        if s1.type != s2.type and s2.type != s3.type:  # e.g. up-down-up or down-up-down
-            # Calculate overlap for these three strokes
-            # For up-down-up: s1(up), s2(down), s3(up)
-            # ZD = max(s1.low, s3.low) (More accurately, max of lows of up-strokes)
-            # ZG = s2.high (More accurately, min of highs of down-strokes)
+        # Check for alternating types
+        if s1.type != s2.type and s2.type != s3.type:
+            # Calculate initial ZG/ZD based on s1, s2, s3
+            if s1.type == "up": # Up-Down-Up sequence
+                zg_candidate = s2.high
+                zd_candidate = max(s1.low, s3.low)
+            else: # Down-Up-Down sequence
+                zg_candidate = min(s1.high, s3.high)
+                zd_candidate = s2.low
 
-            # General definition:
-            # GG = max of all stroke lows in the pivot candidate strokes
-            # DD = min of all stroke highs in the pivot candidate strokes
-            # ZD = max(low of up-strokes in pivot)
-            # ZG = min(high of down-strokes in pivot)
-
-            # For s1, s2, s3:
-            if s1.type == "up":  # s1(up), s2(down), s3(up)
-                zd_candidate = max(s1.low, s3.low)  # Max of the lows of the up strokes
-                zg_candidate = s2.high  # Min of the highs of the down strokes (only s2 here)
-            else:  # s1(down), s2(up), s3(down)
-                zd_candidate = s2.low  # Max of the lows of the up strokes (only s2 here)
-                zg_candidate = min(s1.high, s3.high)  # Min of the highs of the down strokes
-
-            # Check for overlap: ZD must be less than ZG
+            # Check for overlap: ZD < ZG
             if zd_candidate < zg_candidate:
-                # Potential pivot found with s1, s2, s3
+                # Potential pivot found
                 current_pivot_strokes = [s1, s2, s3]
                 current_zd = zd_candidate
                 current_zg = zg_candidate
                 start_date = s1.start_date
                 end_date = s3.end_date
 
-                # Try to extend the pivot with more strokes (up to 9 typically)
+                # Try to extend the pivot
                 j = i + 3
-                while j < len(strokes) and len(current_pivot_strokes) < 9:  # Max 9 strokes in a standard pivot
+                while j < len(strokes): # Check next stroke
                     next_stroke = strokes[j]
-                    # Next stroke must continue the zig-zag and its range must overlap/touch the ZD/ZG
+                    # Check if type alternates and if it interacts with ZG/ZD
                     if next_stroke.type != current_pivot_strokes[-1].type:
-                        # Update ZD/ZG if next_stroke extends the pivot
-                        temp_zd = current_zd
-                        temp_zg = current_zg
+                        # Interaction check (simplified: does next_stroke extreme fall within ZG/ZD?)
+                        # A more complex check involves how the pivot evolves (ZG/ZD update)
+                        interacts = (next_stroke.type == "up" and next_stroke.high >= current_zd) or \
+                                    (next_stroke.type == "down" and next_stroke.low <= current_zg)
 
-                        current_pivot_strokes.append(next_stroke)
+                        if interacts:
+                             # Recalculate ZG/ZD including the new stroke
+                             temp_strokes = current_pivot_strokes + [next_stroke]
+                             up_stroke_lows = [s.low for s in temp_strokes if s.type == "up"]
+                             down_stroke_highs = [s.high for s in temp_strokes if s.type == "down"]
 
-                        # Recalculate ZD and ZG for all strokes in current_pivot_strokes
-                        up_stroke_lows = [s.low for s in current_pivot_strokes if s.type == "up"]
-                        down_stroke_highs = [s.high for s in current_pivot_strokes if s.type == "down"]
+                             if not up_stroke_lows or not down_stroke_highs: break # Should not happen
 
-                        if not up_stroke_lows or not down_stroke_highs:  # Should not happen if alternating
-                            break
+                             new_zd = max(up_stroke_lows)
+                             new_zg = min(down_stroke_highs)
 
-                        new_zd = max(up_stroke_lows) if up_stroke_lows else -np.inf
-                        new_zg = min(down_stroke_highs) if down_stroke_highs else np.inf
-
-                        if new_zd < new_zg:  # Still a valid pivot
-                            current_zd = new_zd
-                            current_zg = new_zg
-                            end_date = next_stroke.end_date
-                            j += 1
-                        else:  # Adding next_stroke invalidates pivot, so pivot ended before it
-                            current_pivot_strokes.pop()  # Remove next_stroke
-                            break
-                    else:  # Type doesn't alternate, pivot ends
+                             if new_zd < new_zg: # Still a valid pivot range
+                                  current_pivot_strokes.append(next_stroke)
+                                  current_zd = new_zd # Update ZD/ZG
+                                  current_zg = new_zg
+                                  end_date = next_stroke.end_date
+                                  j += 1
+                             else: # Adding stroke destroyed pivot overlap
+                                  break
+                        else: # Stroke does not interact enough to extend pivot
+                             break
+                    else: # Type doesn't alternate
                         break
 
-                pivots.append(Pivot(list(current_pivot_strokes), current_zg, current_zd, start_date, end_date))
-                # Advance i past the strokes included in this pivot
-                # i should start at the beginning of the stroke that breaks the pivot, or after the last stroke of the pivot.
-                # For simplicity, advance by number of strokes in pivot. This might miss overlapping pivots.
-                i += len(current_pivot_strokes)
-            else:  # No overlap for s1,s2,s3
+                # Only add pivot if it contains at least 3 strokes
+                if len(current_pivot_strokes) >= 3:
+                    pivots.append(Pivot(list(current_pivot_strokes), current_zg, current_zd, start_date, end_date))
+                    # Advance i past the strokes in this pivot to avoid overlapping pivot detection (simplification)
+                    i += len(current_pivot_strokes)
+                else: # Should not happen if started with 3
+                     i += 1
+            else: # No overlap for s1, s2, s3
                 i += 1
-        else:  # Types not alternating for s1,s2,s3
+        else: # Types not alternating
             i += 1
 
+    print(f"Identified pivots: {len(pivots)}")
     return pivots
 
 
@@ -571,320 +486,412 @@ def identify_pivots(strokes):
 def detect_divergence_macd(df_with_macd, strokes_or_segments, pivots):
     """
     Detects divergence using MACD.
-    df_with_macd should have 'macd', 'macdsignal', 'macdhist' columns.
-    strokes_or_segments: list of Stroke or Segment objects.
-    pivots: list of Pivot objects.
-    Returns a list of divergence signals (e.g., (date, type_of_divergence, stroke_indices_involved))
     """
-    divergences =
-    if df_with_macd is None or strokes_or_segments is None or len(strokes_or_segments) < 2:
+    divergences = [] # Corrected initialization
+    if not TALIB_AVAILABLE:
+        print("Skipping MACD divergence detection as TA-Lib is not available.")
         return divergences
 
-    # MACD calculation if not already present (example)
-    if 'macd' not in df_with_macd.columns:
-        close_prices = df_with_macd['close']
-        macd, macdsignal, macdhist = talib.MACD(close_prices, fastperiod=12, slowperiod=26, signalperiod=9)
-        df_with_macd['macd'] = macd
-        df_with_macd['macdsignal'] = macdsignal
-        df_with_macd['macdhist'] = macdhist
+    if df_with_macd is None or df_with_macd.empty or strokes_or_segments is None or len(strokes_or_segments) < 2:
+        return divergences
 
-    # 1. Trend Divergence (using strokes/segments)
-    # Needs at least two consecutive segments/strokes of the same type after a trend is established
-    # (e.g. after two pivots in same direction)
-    # For simplicity, let's check divergence between any two comparable strokes/segments
-    for i in range(len(strokes_or_segments) - 1):
+    # Ensure MACD is calculated
+    if 'macdhist' not in df_with_macd.columns:
+        close_prices = df_with_macd['close'].astype(float)
+        if len(close_prices) < 34: # Need enough data for MACD
+            print("Warning: Not enough data for MACD calculation in divergence check.")
+            return divergences
+        try:
+            macd, macdsignal, macdhist = talib.MACD(close_prices.values, fastperiod=12, slowperiod=26, signalperiod=9)
+            # Assign back to DataFrame, ensuring index alignment
+            df_with_macd = df_with_macd.copy() # Avoid SettingWithCopyWarning
+            df_with_macd['macd'] = macd
+            df_with_macd['macdsignal'] = macdsignal
+            df_with_macd['macdhist'] = macdhist
+        except Exception as e:
+            print(f"Error calculating MACD: {e}")
+            return divergences
+
+    # --- Trend Divergence (using strokes/segments) ---
+    for i in range(len(strokes_or_segments) - 2): # Need i, i+1, i+2
         item1 = strokes_or_segments[i]
-        # Find next comparable item (same type, separated by one opposite type)
-        if i + 2 < len(strokes_or_segments):
-            item2 = strokes_or_segments[i + 2]
-            if item1.type == item2.type and item1.type != strokes_or_segments[i + 1].type:
-                # Get MACD hist sum for item1 and item2
-                # Need original indices from KLine objects within strokes/segments
-                macd_hist_sum1 = df_with_macd['macdhist'].iloc[
-                                 item1.start_kline_original_idx: item1.end_kline_original_idx + 1].sum()
-                macd_hist_sum2 = df_with_macd['macdhist'].iloc[
-                                 item2.start_kline_original_idx: item2.end_kline_original_idx + 1].sum()
+        item2 = strokes_or_segments[i + 2]
+        item_mid = strokes_or_segments[i+1] # The item between
 
-                if item1.type == "up":  # Potential top divergence
-                    if item2.end_price > item1.end_price and macd_hist_sum2 < macd_hist_sum1:  # Price higher, MACD lower
-                        divergences.append({
-                            "date": item2.end_date,
-                            "type": "trend_top_divergence",
-                            "item1_end_price": item1.end_price, "item2_end_price": item2.end_price,
-                            "item1_macd_sum": macd_hist_sum1, "item2_macd_sum": macd_hist_sum2
-                        })
-                elif item1.type == "down":  # Potential bottom divergence
-                    if item2.end_price < item1.end_price and macd_hist_sum2 > macd_hist_sum1:  # Price lower, MACD (abs value) lower or MACD value higher
-                        # For macdhist (green bars are negative): sum of green bars for item2 is less negative (closer to 0)
-                        # So, macd_hist_sum2 (which is negative) > macd_hist_sum1 (more negative)
-                        divergences.append({
-                            "date": item2.end_date,
-                            "type": "trend_bottom_divergence",
-                            "item1_end_price": item1.end_price, "item2_end_price": item2.end_price,
-                            "item1_macd_sum": macd_hist_sum1, "item2_macd_sum": macd_hist_sum2
-                        })
+        # Check if item1 and item2 are comparable (same type, separated by one opposite)
+        if item1.type == item2.type and item1.type != item_mid.type:
+            # Get MACD histogram area (sum of histogram values) for the strokes/segments
+            try:
+                # Ensure indices are valid and within DataFrame bounds
+                idx1_start = max(0, item1.start_kline_original_idx)
+                idx1_end = min(len(df_with_macd), item1.end_kline_original_idx + 1)
+                idx2_start = max(0, item2.start_kline_original_idx)
+                idx2_end = min(len(df_with_macd), item2.end_kline_original_idx + 1)
 
-    # 2. Consolidation Divergence (related to pivots)
-    # This requires identifying moves out of a pivot and comparing their strength.
-    # Example: move1 leaves pivot downwards, move2 leaves pivot downwards again to a new low.
-    # This is more complex as it requires tracking pivot exits.
-    if pivots:
-        for pivot in pivots:
-            # Find strokes leaving this pivot
-            strokes_after_pivot_start = [s for s in strokes_or_segments if
-                                         s.start_date >= pivot.start_date]  # Simplified
+                if idx1_start >= idx1_end or idx2_start >= idx2_end: continue # Skip if indices are invalid
 
-            departures_down =
-            departures_up =
+                macd_hist_sum1 = df_with_macd['macdhist'].iloc[idx1_start:idx1_end].sum()
+                macd_hist_sum2 = df_with_macd['macdhist'].iloc[idx2_start:idx2_end].sum()
 
-            last_stroke_in_pivot_idx = -1
-            for idx, s in enumerate(strokes_after_pivot_start):
-                if s.end_date <= pivot.end_date:  # Stroke is part of pivot formation or ends within
-                    last_stroke_in_pivot_idx = idx
+                # Check for NaNs in sums
+                if pd.isna(macd_hist_sum1) or pd.isna(macd_hist_sum2):
+                    # print(f"Debug: NaN MACD sum for items starting {item1.start_date} or {item2.start_date}")
                     continue
 
-                # Stroke starts after or within pivot, and ends outside
-                # This is a departure stroke
-                prev_stroke_in_pivot = strokes_after_pivot_start[
-                    last_stroke_in_pivot_idx] if last_stroke_in_pivot_idx != -1 else None
+            except IndexError:
+                print(f"Warning: Index out of bounds during MACD divergence check for items starting {item1.start_date} / {item2.start_date}.")
+                continue
+            except Exception as e:
+                print(f"Error accessing MACD data for divergence: {e}")
+                continue
 
-                if s.type == "down" and s.end_price < pivot.zd:  # Departure downwards
-                    # Check if it's a new low compared to previous departures from this pivot
-                    departures_down.append(s)
-                elif s.type == "up" and s.end_price > pivot.zg:  # Departure upwards
-                    departures_up.append(s)
 
-            if len(departures_down) >= 2:
-                s1_down, s2_down = departures_down, departures_down  # Simplistic: first two
-                # Ensure s2_down is a new low after s1_down
-                if s2_down.end_price < s1_down.end_price:
-                    macd_hist_sum1_down = df_with_macd['macdhist'].iloc[
-                                          s1_down.start_kline_original_idx:s1_down.end_kline_original_idx + 1].sum()
-                    macd_hist_sum2_down = df_with_macd['macdhist'].iloc[
-                                          s2_down.start_kline_original_idx:s2_down.end_kline_original_idx + 1].sum()
-                    if macd_hist_sum2_down > macd_hist_sum1_down:  # MACD higher (less negative)
-                        divergences.append({
-                            "date": s2_down.end_date,
-                            "type": "consolidation_bottom_divergence",
-                            "pivot_zd": pivot.zd, "s1_price": s1_down.end_price, "s2_price": s2_down.end_price,
-                            "s1_macd_sum": macd_hist_sum1_down, "s2_macd_sum": macd_hist_sum2_down
-                        })
-            if len(departures_up) >= 2:
-                s1_up, s2_up = departures_up, departures_up
-                if s2_up.end_price > s1_up.end_price:
-                    macd_hist_sum1_up = df_with_macd['macdhist'].iloc[
-                                        s1_up.start_kline_original_idx:s1_up.end_kline_original_idx + 1].sum()
-                    macd_hist_sum2_up = df_with_macd['macdhist'].iloc[
-                                        s2_up.start_kline_original_idx:s2_up.end_kline_original_idx + 1].sum()
-                    if macd_hist_sum2_up < macd_hist_sum1_up:  # MACD lower
-                        divergences.append({
-                            "date": s2_up.end_date,
-                            "type": "consolidation_top_divergence",
-                            "pivot_zg": pivot.zg, "s1_price": s1_up.end_price, "s2_price": s2_up.end_price,
-                            "s1_macd_sum": macd_hist_sum1_up, "s2_macd_sum": macd_hist_sum2_up
-                        })
+            # --- Check Divergence Conditions ---
+            if item1.type == "up":  # Potential top divergence (Price Higher, MACD Area Lower)
+                if item2.end_price > item1.end_price and macd_hist_sum2 < macd_hist_sum1:
+                    divergences.append({
+                        "date": item2.end_date,
+                        "type": "trend_top_divergence",
+                        "level": "stroke" if isinstance(item1, Stroke) else "segment",
+                        "item1_end_price": item1.end_price, "item2_end_price": item2.end_price,
+                        "item1_macd_sum": macd_hist_sum1, "item2_macd_sum": macd_hist_sum2
+                    })
+            elif item1.type == "down":  # Potential bottom divergence (Price Lower, MACD Area Higher/Less Negative)
+                if item2.end_price < item1.end_price and macd_hist_sum2 > macd_hist_sum1:
+                    divergences.append({
+                        "date": item2.end_date,
+                        "type": "trend_bottom_divergence",
+                        "level": "stroke" if isinstance(item1, Stroke) else "segment",
+                        "item1_end_price": item1.end_price, "item2_end_price": item2.end_price,
+                        "item1_macd_sum": macd_hist_sum1, "item2_macd_sum": macd_hist_sum2
+                    })
+
+    # --- Consolidation (Pivot) Divergence ---
+    # This requires identifying strokes leaving a pivot and comparing them.
+    if pivots:
+         for pivot in pivots:
+              departures_down = []
+              departures_up = []
+              # Find strokes starting after the pivot ends
+              strokes_after_pivot = [s for s in strokes_or_segments if s.start_date >= pivot.end_date]
+
+              for stroke in strokes_after_pivot:
+                   # Check if it's a clear departure
+                   if stroke.type == "down" and stroke.end_price < pivot.zd:
+                        departures_down.append(stroke)
+                   elif stroke.type == "up" and stroke.end_price > pivot.zg:
+                        departures_up.append(stroke)
+                   # Stop checking departures once a stroke of the opposite direction occurs after a departure
+                   if (departures_down and stroke.type == "up") or (departures_up and stroke.type == "down"):
+                        break
+
+              # Analyze departures for divergence
+              if len(departures_down) >= 2:
+                   s1, s2 = departures_down[0], departures_down[1] # Compare first two downward departures
+                   if s2.end_price < s1.end_price: # Second departure makes a new low
+                        try:
+                             idx1_start = max(0, s1.start_kline_original_idx)
+                             idx1_end = min(len(df_with_macd), s1.end_kline_original_idx + 1)
+                             idx2_start = max(0, s2.start_kline_original_idx)
+                             idx2_end = min(len(df_with_macd), s2.end_kline_original_idx + 1)
+                             if idx1_start >= idx1_end or idx2_start >= idx2_end: continue
+
+                             macd_sum1 = df_with_macd['macdhist'].iloc[idx1_start:idx1_end].sum()
+                             macd_sum2 = df_with_macd['macdhist'].iloc[idx2_start:idx2_end].sum()
+
+                             if pd.notna(macd_sum1) and pd.notna(macd_sum2) and macd_sum2 > macd_sum1: # MACD higher (less negative)
+                                  divergences.append({
+                                      "date": s2.end_date, "type": "consolidation_bottom_divergence",
+                                      "pivot_zd": pivot.zd, "s1_price": s1.end_price, "s2_price": s2.end_price,
+                                      "s1_macd_sum": macd_sum1, "s2_macd_sum": macd_sum2
+                                  })
+                        except Exception as e: print(f"Error processing pivot divergence down: {e}")
+
+              if len(departures_up) >= 2:
+                   s1, s2 = departures_up[0], departures_up[1] # Compare first two upward departures
+                   if s2.end_price > s1.end_price: # Second departure makes a new high
+                        try:
+                             idx1_start = max(0, s1.start_kline_original_idx)
+                             idx1_end = min(len(df_with_macd), s1.end_kline_original_idx + 1)
+                             idx2_start = max(0, s2.start_kline_original_idx)
+                             idx2_end = min(len(df_with_macd), s2.end_kline_original_idx + 1)
+                             if idx1_start >= idx1_end or idx2_start >= idx2_end: continue
+
+                             macd_sum1 = df_with_macd['macdhist'].iloc[idx1_start:idx1_end].sum()
+                             macd_sum2 = df_with_macd['macdhist'].iloc[idx2_start:idx2_end].sum()
+
+                             if pd.notna(macd_sum1) and pd.notna(macd_sum2) and macd_sum2 < macd_sum1: # MACD lower
+                                  divergences.append({
+                                      "date": s2.end_date, "type": "consolidation_top_divergence",
+                                      "pivot_zg": pivot.zg, "s1_price": s1.end_price, "s2_price": s2.end_price,
+                                      "s1_macd_sum": macd_sum1, "s2_macd_sum": macd_sum2
+                                  })
+                        except Exception as e: print(f"Error processing pivot divergence up: {e}")
+
+
+    print(f"Detected divergences: {len(divergences)}")
     return divergences
 
 
 ### G. 三类买卖点识别函数 (`find_trading_signals`)
 def find_trading_signals(processed_k_lines, strokes, segments, pivots, divergences, df_raw):
-    signals =  # Store as dicts: {"date": date, "signal_type": "1B/1S/2B/2S/3B/3S", "price": price, "details":...}
+    signals = [] # Corrected initialization
 
-    # Ensure all inputs are sorted by date if they come from different processing steps
-    # This implementation assumes inputs are chronologically ordered.
-
-    # First Class Buy/Sell Points (from Divergences)
+    # 1. First Class Buy/Sell Points (from Divergences)
     for div in divergences:
-        price_at_divergence = None
-        # Find the K-line corresponding to the divergence date to get the price
-        # The divergence date is div['date'], which is an end_date of a stroke/segment
-        # The actual buy/sell point is the extreme of that stroke/segment.
+        signal_price = div.get("s2_price") # The price at the point of divergence
+        if signal_price is None: continue
 
-        # Find the stroke/segment that ended on div['date'] and caused this divergence.
-        # This requires linking divergence back to the specific stroke.
-        # The current divergence structure is simplified.
-        # For now, let's assume div['date'] is the date of the signal.
-        # The price would be the high/low of the K-line on that date, or the extreme of the involved stroke.
+        if "bottom_divergence" in div["type"]:
+            signals.append({"date": div["date"], "signal_type": "1B", "price": signal_price, "details": div})
+        elif "top_divergence" in div["type"]:
+            signals.append({"date": div["date"], "signal_type": "1S", "price": signal_price, "details": div})
 
-        # A more robust way: the divergence calculation should store the stroke causing it.
-        # For now, we'll use the price from the divergence dict if available.
+    # 2. Second Class Buy/Sell Points (Simplified Logic)
+    # 2B: After a 1B, the first pullback (down-stroke) whose low is higher than the 1B low.
+    # 2S: After a 1S, the first rally (up-stroke) whose high is lower than the 1S high.
+    first_buy_signals = sorted([s for s in signals if s["signal_type"] == "1B"], key=lambda x: x["date"])
+    first_sell_signals = sorted([s for s in signals if s["signal_type"] == "1S"], key=lambda x: x["date"])
 
-        if div["type"] == "trend_bottom_divergence" or div["type"] == "consolidation_bottom_divergence":
-            price_at_divergence = div.get("s2_price")  # This is the low point of the divergence
-            if price_at_divergence is not None:
-                signals.append({"date": div["date"], "signal_type": "1B", "price": price_at_divergence, "details": div})
-        elif div["type"] == "trend_top_divergence" or div["type"] == "consolidation_top_divergence":
-            price_at_divergence = div.get("s2_price")  # This is the high point of the divergence
-            if price_at_divergence is not None:
-                signals.append({"date": div["date"], "signal_type": "1S", "price": price_at_divergence, "details": div})
+    last_1b_date = None
+    last_1b_price = -np.inf
+    if first_buy_signals:
+        last_1b_date = first_buy_signals[0]['date'] # Consider the earliest 1B for subsequent 2B/3B
+        last_1b_price = first_buy_signals[0]['price']
 
-    # Second and Third Class Buy/Sell Points (require pivots and strokes/segments)
-    # This logic is complex and requires careful state tracking.
+    last_1s_date = None
+    last_1s_price = np.inf
+    if first_sell_signals:
+        last_1s_date = first_sell_signals[0]['date']
+        last_1s_price = first_sell_signals[0]['price']
 
-    # Iterate through strokes/segments and pivots chronologically
-    # This is a simplified conceptual outline for 2nd/3rd points. Full implementation is extensive.
+    for i in range(len(strokes)):
+        stroke = strokes[i]
+        # Check for 2B
+        if last_1b_date and stroke.type == "down" and stroke.start_date > last_1b_date:
+            if stroke.end_price > last_1b_price:
+                 # Check if this is the *first* such pullback after the latest 1B
+                 is_first_pullback = True
+                 for j in range(i - 1, -1, -1):
+                      prev_stroke = strokes[j]
+                      if prev_stroke.end_date <= last_1b_date: break # Stop checking before 1B
+                      if prev_stroke.type == "down" and prev_stroke.end_price > last_1b_price:
+                           is_first_pullback = False # Found an earlier valid 2B candidate
+                           break
+                 if is_first_pullback:
+                      signals.append({"date": stroke.end_date, "signal_type": "2B", "price": stroke.end_price, "details": f"Follows 1B at {last_1b_date} ({last_1b_price:.2f})"})
+                      # Potentially update last_1b_date here if we only want one 2B per 1B sequence?
 
-    # For Second Buy (2B):
-    # 1. Identify a 1B signal. Let its date be D_1B, price P_1B.
-    # 2. Find the *previous relevant pivot* (P_prev) that led to the downward move ending in 1B.
-    # 3. After 1B, price rallies (up-stroke/segment S_up).
-    # 4. S_up's high does NOT break P_prev.ZG.
-    # 5. Price then falls back (down-stroke/segment S_down).
-    # 6. S_down's low (P_2B) is HIGHER than P_1B. This P_2B is the 2B.
-    # (Similar logic for 2S)
+        # Check for 2S
+        if last_1s_date and stroke.type == "up" and stroke.start_date > last_1s_date:
+            if stroke.end_price < last_1s_price:
+                 is_first_rally = True
+                 for j in range(i - 1, -1, -1):
+                      prev_stroke = strokes[j]
+                      if prev_stroke.end_date <= last_1s_date: break
+                      if prev_stroke.type == "up" and prev_stroke.end_price < last_1s_price:
+                           is_first_rally = False
+                           break
+                 if is_first_rally:
+                      signals.append({"date": stroke.end_date, "signal_type": "2S", "price": stroke.end_price, "details": f"Follows 1S at {last_1s_date} ({last_1s_price:.2f})"})
+                      # Update last_1s_date?
 
-    # For Third Buy (3B):
-    # 1. Identify a pivot (P_current).
-    # 2. Price breaks out upwards from P_current.ZG (up-stroke/segment S_breakout).
-    # 3. Price then pulls back (down-stroke/segment S_pullback).
-    # 4. S_pullback's low does NOT re-enter P_current (i.e., low > P_current.ZG).
-    # 5. The low of S_pullback is the 3B.
-    # (Similar logic for 3S)
-
-    # Placeholder for 2nd/3rd buy/sell points - requires more intricate logic
-    # This would involve iterating through strokes and pivots, checking conditions relative to prior signals.
-
-    # Example logic sketch for 3B (highly simplified):
+    # 3. Third Class Buy/Sell Points (Simplified Logic)
+    # 3B: Stroke breaks out above a pivot (ZG), then a subsequent pullback stroke's low stays above ZG.
+    # 3S: Stroke breaks out below a pivot (ZD), then a subsequent rally stroke's high stays below ZD.
+    processed_pivot_breaks = set() # Avoid multiple signals for the same breakout/pullback
     if pivots and strokes:
         for p_idx, pivot in enumerate(pivots):
-            # Find first stroke that clearly exits the pivot upwards
-            for s_idx, stroke in enumerate(strokes):
-                if stroke.start_date > pivot.end_date and stroke.type == "up" and stroke.low > pivot.zg:  # Breakout stroke
-                    # Now look for a pullback stroke
+            for s_idx in range(len(strokes)):
+                stroke = strokes[s_idx]
+                # Check for upward breakout
+                if stroke.type == "up" and stroke.start_date >= pivot.end_date and stroke.low > pivot.zd and stroke.end_price > pivot.zg:
+                    # Found potential breakout, look for pullback
                     if s_idx + 1 < len(strokes):
                         pullback_stroke = strokes[s_idx + 1]
-                        if pullback_stroke.type == "down" and pullback_stroke.end_price > pivot.zg:  # Pullback stays above ZG
-                            # Potential 3B at pullback_stroke.end_price (the low of the pullback)
-                            signals.append({
-                                "date": pullback_stroke.end_date,
-                                "signal_type": "3B",
-                                "price": pullback_stroke.end_price,
-                                "details": f"Pivot ZG: {pivot.zg}, Breakout stroke end: {stroke.end_price}"
-                            })
-                            break  # Found one 3B for this pivot breakout
-            # Similar for 3S
+                        if pullback_stroke.type == "down" and pullback_stroke.end_price > pivot.zg: # Pullback stays above ZG
+                            signal_key = (pivot.start_date, pivot.end_date, pullback_stroke.end_date, "3B")
+                            if signal_key not in processed_pivot_breaks:
+                                signals.append({
+                                    "date": pullback_stroke.end_date, "signal_type": "3B",
+                                    "price": pullback_stroke.end_price,
+                                    "details": f"Pivot ({pivot.start_date}-{pivot.end_date}, ZG:{pivot.zg:.2f}), Breakout end: {stroke.end_price:.2f}"
+                                })
+                                processed_pivot_breaks.add(signal_key)
+                                break # Move to next pivot after finding a 3B for this breakout
+
+                # Check for downward breakout
+                elif stroke.type == "down" and stroke.start_date >= pivot.end_date and stroke.high < pivot.zg and stroke.end_price < pivot.zd:
+                    # Found potential breakout, look for rally
+                    if s_idx + 1 < len(strokes):
+                        rally_stroke = strokes[s_idx + 1]
+                        if rally_stroke.type == "up" and rally_stroke.end_price < pivot.zd: # Rally stays below ZD
+                            signal_key = (pivot.start_date, pivot.end_date, rally_stroke.end_date, "3S")
+                            if signal_key not in processed_pivot_breaks:
+                                signals.append({
+                                    "date": rally_stroke.end_date, "signal_type": "3S",
+                                    "price": rally_stroke.end_price,
+                                    "details": f"Pivot ({pivot.start_date}-{pivot.end_date}, ZD:{pivot.zd:.2f}), Breakout end: {stroke.end_price:.2f}"
+                                })
+                                processed_pivot_breaks.add(signal_key)
+                                break # Move to next pivot
 
     # Sort signals by date
     signals.sort(key=lambda x: x["date"])
+    print(f"Generated trading signals: {len(signals)}")
     return signals
 
 
 ### H. 主策略编排函数 (`run_chanlun_strategy`)
 def run_chanlun_strategy(df_raw):
-    if df_raw is None or len(df_raw) < 20:  # Need enough data for MACD and structures
-        print("Not enough data to run Chanlun strategy.")
-        return
+    """
+    Runs the full Chanlun analysis pipeline.
+    """
+    if df_raw is None or len(df_raw) < 35:  # Need enough data for MACD and structures
+        print("Error: Not enough data provided to run Chanlun strategy (need ~35 bars minimum).")
+        return None # Return None or empty list on failure
+
+    print("\n--- Running Chanlun Analysis ---")
+    start_time = pd.Timestamp.now()
+
+    # Ensure DataFrame index is datetime
+    if not isinstance(df_raw.index, pd.DatetimeIndex):
+         if 'date' in df_raw.columns:
+              try:
+                   df_raw['date'] = pd.to_datetime(df_raw['date'])
+                   df_raw = df_raw.set_index('date')
+                   print("Set 'date' column as DatetimeIndex.")
+              except Exception as e:
+                   print(f"Error setting 'date' column as index: {e}")
+                   return None
+         else:
+              print("Error: DataFrame must have a DatetimeIndex or a 'date' column.")
+              return None
+
+    # Ensure required columns exist and are numeric
+    required_cols = ['open', 'high', 'low', 'close']
+    for col in required_cols:
+         if col not in df_raw.columns:
+              print(f"Error: Missing required column '{col}' in input DataFrame.")
+              return None
+         try:
+              df_raw[col] = pd.to_numeric(df_raw[col])
+         except ValueError:
+              print(f"Error: Column '{col}' contains non-numeric data.")
+              return None
+
 
     # 1. K-Line Preprocessing
+    print("Step 1: Preprocessing K-lines...")
     processed_k_lines = preprocess_k_lines(df_raw.copy())
     if not processed_k_lines:
-        print("K-line preprocessing failed or resulted in no data.")
-        return
-    # print(f"Processed K-lines: {len(processed_k_lines)}")
+        print("Error: K-line preprocessing failed or resulted in no data.")
+        return None
 
     # 2. Fractal Identification
+    print("Step 2: Identifying Fractals...")
     fractals = identify_fractals(processed_k_lines)
     if not fractals:
-        print("No fractals identified.")
-        return
-    # print(f"Fractals identified: {len(fractals)}")
-    # for f in fractals[:5]: print(f.date, f.fractal_type, f.price)
+        print("Warning: No fractals identified. Cannot proceed further.")
+        return [] # Return empty list if no fractals
 
     # 3. Stroke Construction
-    # The stroke construction logic needs to be robust. The current one is a basic attempt.
+    print("Step 3: Constructing Strokes...")
     strokes = construct_strokes(fractals, processed_k_lines)
     if not strokes:
-        print("No strokes constructed.")
-        return
-    # print(f"Strokes constructed: {len(strokes)}")
-    # for s in strokes[:5]: print(s.start_date, s.end_date, s.type, s.start_price, s.end_price)
+        print("Warning: No strokes constructed. Cannot identify pivots or segments.")
+        # Can still proceed to MACD divergence on fractals if needed, but signals will be limited.
+        pivots = []
+        segments = []
+    else:
+        # 4. Line Segment Construction (Optional but useful for higher-level analysis)
+        print("Step 4: Constructing Line Segments (Simplified)...")
+        segments = construct_line_segments(strokes)
 
-    # 4. Line Segment Construction (Simplified)
-    # Segments are built from strokes. The current segment logic is very basic.
-    segments = construct_line_segments(strokes)  # Using strokes as sub-level for segments
-    # print(f"Segments constructed: {len(segments)}")
-    # for seg in segments[:3]: print(seg.start_date, seg.end_date, seg.type, len(seg.strokes))
-
-    # 5. Pivot Identification
-    # Pivots are typically built from segments, or strokes if segments are not well-defined.
-    # Using strokes directly for pivot identification is a common simplification for single-level analysis.
-    pivots = identify_pivots(strokes)  # Using strokes to find pivots
-    if not pivots:
-        print("No pivots identified (or too few strokes).")
-        # return # Strategy can proceed without pivots for 1st class signals if only strokes are used for divergence
-    # print(f"Pivots identified: {len(pivots)}")
-    # for p in pivots[:3]: print(p.start_date, p.end_date, p.zd, p.zg, len(p.strokes_in_pivot))
+        # 5. Pivot Identification
+        print("Step 5: Identifying Pivots (using Strokes)...")
+        pivots = identify_pivots(strokes)
 
     # 6. Divergence Detection (using MACD)
-    # Prepare DataFrame with MACD for divergence detection
-    df_with_macd = df_raw.copy()
-    close_prices = df_with_macd['close'].astype(float)  # Ensure float type for talib
-
-    # Check for sufficient data for TALIB MACD
-    if len(close_prices) < 34:  # Default slowperiod (26) + signalperiod (9) -1 approx
-        print("Not enough data for MACD calculation.")
-        divergences =
-    else:
-        macd, macdsignal, macdhist = talib.MACD(close_prices, fastperiod=12, slowperiod=26, signalperiod=9)
-        df_with_macd['macd'] = macd
-        df_with_macd['macdsignal'] = macdsignal
-        df_with_macd['macdhist'] = macdhist
-        divergences = detect_divergence_macd(df_with_macd, strokes, pivots)  # Use strokes for divergence
-    # print(f"Divergences detected: {len(divergences)}")
-    # for d in divergences: print(d)
+    print("Step 6: Detecting MACD Divergence...")
+    # Pass the original DataFrame for MACD calculation
+    df_with_macd = df_raw.copy() # Use original df for MACD
+    # Use strokes for divergence detection as they are more fundamental than segments
+    divergences = detect_divergence_macd(df_with_macd, strokes, pivots)
 
     # 7. Identify Trading Signals
-    # The find_trading_signals function needs to be more robust for 2nd and 3rd type.
-    # Current version focuses on 1st type and a sketch of 3rd.
+    print("Step 7: Identifying Trading Signals...")
     trading_signals = find_trading_signals(processed_k_lines, strokes, segments, pivots, divergences, df_raw)
-    # print(f"Trading signals found: {len(trading_signals)}")
-    # for sig in trading_signals: print(sig)
+
+    end_time = pd.Timestamp.now()
+    print(f"--- Chanlun Analysis Completed in {(end_time - start_time).total_seconds():.2f} seconds ---")
 
     return trading_signals
 
 
-### I. 完整代码清单与使用示例
-
-```python
-#
-# ... (KLine, Fractal, Stroke, Segment, Pivot classes)...
-# ... (preprocess_k_lines function)...
-# ... (identify_fractals function)...
-# ... (construct_strokes function)...
-# ... (construct_line_segments function)...
-# ... (identify_pivots function)...
-# ... (detect_divergence_macd function)...
-# ... (find_trading_signals function)...
-# ... (run_chanlun_strategy function)...
-
-# Usage Example:
+# Usage Example (Needs a data loading function)
 if __name__ == '__main__':
-    # Example: Fetch data for a stock
-    symbol_example = "sh600519"  # Kweichow Moutai
-    start_date_example = "20220101"
-    end_date_example = "20231231"
 
-    # Function to get data (defined earlier or assumed available)
-    # def fetch_stock_data(symbol, start_date, end_date):...
+    # Dummy function for fetching data - REPLACE WITH YOUR ACTUAL DATA LOADER
+    def fetch_stock_data(symbol, start_date, end_date):
+        # Example: using akshare (make sure it's installed: pip install akshare)
+        try:
+            import akshare as ak
+            print(f"Fetching data for {symbol} from {start_date} to {end_date} using akshare...")
+            # Adjust symbol format if needed (e.g., 'sh600519' -> '600519')
+            ak_symbol = symbol.replace('sh', '').replace('sz', '')
+            df = ak.stock_zh_a_hist(symbol=ak_symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq") # qfq = 前复权
+            if df is None or df.empty:
+                 print(f"Warning: akshare returned no data for {symbol}.")
+                 return None
+            # Rename columns to match 'open', 'high', 'low', 'close'
+            df.rename(columns={
+                "日期": "date",
+                "开盘": "open",
+                "收盘": "close",
+                "最高": "high",
+                "最低": "low",
+                # Add other columns if needed by KLine or other parts
+            }, inplace=True)
+            df['date'] = pd.to_datetime(df['date'])
+            df = df.set_index('date')
+            # Ensure correct data types
+            for col in ['open', 'high', 'low', 'close']:
+                 df[col] = pd.to_numeric(df[col], errors='coerce')
+            df.dropna(subset=['open', 'high', 'low', 'close'], inplace=True) # Drop rows with NaN in essential columns
+            print(f"Data fetched and prepared: {len(df)} rows.")
+            return df
+        except ImportError:
+            print("Error: akshare library not found. Please install it: pip install akshare")
+            return None
+        except Exception as e:
+            print(f"Error fetching data using akshare for {symbol}: {e}")
+            return None
+
+    # Example Usage:
+    symbol_example = "sz000887"  # 中鼎股份 (Example)
+    start_date_example = "20230101" # Start date YYYYMMDD
+    end_date_example = "20240430"   # End date YYYYMMDD
 
     raw_data = fetch_stock_data(symbol_example, start_date_example, end_date_example)
 
     if raw_data is not None and not raw_data.empty:
-        print(f"Fetched {len(raw_data)} rows for {symbol_example}")
-
-        # Add a simple moving average to demonstrate data is present
-        # raw_data = talib.SMA(raw_data['close'], timeperiod=20)
-        # print(raw_data.tail())
-
+        print(f"\n--- Running Chanlun Strategy for {symbol_example} ---")
         final_signals = run_chanlun_strategy(raw_data)
 
-        if final_signals:
-            print(f"\n--- Generated Trading Signals for {symbol_example} ---")
-            for signal in final_signals:
-                print(
-                    f"Date: {signal['date']}, Type: {signal['signal_type']}, Price: {signal['price']:.2f}, Details: {signal.get('details', '')}")
+        if final_signals is not None: # Check for None return on error
+            print(f"\n--- Generated Trading Signals for {symbol_example} ({len(final_signals)} signals) ---")
+            if not final_signals:
+                 print("No trading signals generated.")
+            else:
+                 # Create DataFrame for better display
+                 signals_df = pd.DataFrame(final_signals)
+                 # Format price for display
+                 signals_df['price'] = signals_df['price'].apply(lambda x: f"{x:.2f}")
+                 # Optionally select/reorder columns
+                 print(signals_df[['date', 'signal_type', 'price', 'details']].to_string())
         else:
-            print(f"No trading signals generated for {symbol_example}.")
+            print(f"Chanlun strategy execution failed for {symbol_example}.")
 
     else:
-        print(f"Could not fetch data for {symbol_example}.")
+        print(f"Could not fetch or prepare data for {symbol_example}.")
