@@ -1,22 +1,22 @@
 # requirements.txt
 
 # --- 数据库 ---
-sqlalchemy
+sqlalchemy~=2.0.40
 psycopg2-binary   # For PostgreSQL connection
-pgvector          # pgvector client for SQLAlchemy
+pgvector~=0.4.1
 
 # --- 数据处理与爬虫 ---
-requests          # HTTP requests
-pypdf             # PDF text extraction (replaces PyPDF2)
-beautifulsoup4    # HTML parsing (for finding PDF links etc.)
+requests~=2.32.3
+pypdf~=5.4.0
+beautifulsoup4~=4.13.4
 lxml              # Faster HTML parser for BeautifulSoup (optional but recommended)
 
 # --- 向量嵌入 ---
-sentence-transformers
+sentence-transformers~=4.1.0
 torch             # Backend for sentence-transformers (or tensorflow, jax)
 
 # --- LLM 与 RAG ---
-ollama            # Client for Ollama LLM server
+ollama~=0.4.8
 # langchain       # (可选) 强大的 RAG 框架，包含 text splitters, vector store integrations, prompt templates etc.
 # langchain-community # (可选) LangChain community integrations
 # langchain-postgres # (可选) LangChain specific pgvector integration
@@ -26,8 +26,8 @@ ollama            # Client for Ollama LLM server
 google-api-python-client # 推荐用于更健壮的 Google API 交互 (当前代码使用 requests)
 
 # --- 配置管理 ---
-python-dotenv     # Load .env files
-pydantic-settings # Settings management
+python-dotenv~=1.1.0
+pydantic-settings~=2.9.1
 
 # --- (可选) Web 框架与服务器 (如果未来需要 API) ---
 # fastapi
@@ -35,3 +35,22 @@ pydantic-settings # Settings management
 
 # --- (可选) 数据库迁移 ---
 # alembic
+pandas~=2.2.3
+scikit-learn~=1.6.1
+streamlit~=1.44.1
+matplotlib~=3.10.1
+langchain~=0.3.24
+chromadb~=1.0.7
+langchain-community~=0.3.23
+jieba~=0.42.1
+jieba3k~=0.35.1
+langchain-core~=0.3.56
+selenium~=4.31.0
+PyPDF2~=3.0.1
+yagmail~=0.15.293
+akshare~=1.16.81
+rqalpha~=5.5.2
+numpy~=1.26.4
+mplfinance~=0.12.10b0
+python-dateutil~=2.9.0.post0
+APScheduler~=3.11.0
