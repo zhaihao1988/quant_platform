@@ -12,18 +12,15 @@ from datetime import datetime, timedelta, date
 script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(script_dir)
 if project_root not in sys.path:
-    # Ensure logger is configured before use if this block runs first
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
     logger = logging.getLogger(__name__)
     logger.info(f"Adding project root to sys.path: {project_root}")
     sys.path.insert(0, project_root)
 # --- End Path Setup ---
 
-# --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
-logger = logging.getLogger(__name__) # Logger for this module
+logger = logging.getLogger(__name__)
 
-# --- Imports ---
 try:
     from utils.data_loader import load_daily_data
     from data_processing.loader import load_multiple_financial_reports
@@ -34,38 +31,34 @@ except ImportError as e:
     logger.critical(f"Failed to import necessary modules: {e}. Check paths/files. Exiting.", exc_info=True)
     exit()
 
+PEAK_WINDOW = 5  # Window for identifying peaks
+MA_PEAK_THRESHOLD = 1.20 # Peak must be 20% above MA30
+MA_LONG_PERIOD_FOR_PEAK = 30 # MA period to compare the peak against
 
 # --- Constants Definition ---
-PULLBACK_THRESHOLD = 0.05 # 回踩幅度阈值 (5%)
-MA_SHORT_PERIOD = 5       # 短期均线周期
-MA_LONG_PERIOD = 30      # 长期均线周期 (基准线)
-# 基本面常量 (与 multi_level_cross_strategy_new.py 保持一致)
+PULLBACK_THRESHOLD = 0.05
+MA_SHORT_PERIOD = 5
+MA_LONG_PERIOD = 30
 PE_THRESHOLD = 30.0
 PEG_LIKE_THRESHOLD = 1.0
 NET_PROFIT_FIELD = '归属于母公司所有者的净利润'
 REVENUE_FIELD = '营业总收入'
 
 class MAPullbackStrategy(BaseStrategy):
-    """
-    均线回踩策略:
-    在 MA30 向上或走平的趋势中，当股价和 MA5 均在 MA30 之上，
-    且股价回调至 MA30 附近 (上方5%以内) 时产生信号。
-    同时进行基本面过滤。
-    """
     def __init__(self, ma_short=MA_SHORT_PERIOD, ma_long=MA_LONG_PERIOD,
-                 pullback_pct=PULLBACK_THRESHOLD, trend_window=5, timeframe="multi"):
-        # timeframe 参数允许 Runner 指定处理哪个级别，或 'multi' 表示都处理
-        super().__init__(name=f"MAPullback({ma_short},{ma_long},{pullback_pct*100:.0f}%)", timeframe=timeframe)
+                 pullback_pct=PULLBACK_THRESHOLD, trend_window=5, timeframe="multi",
+                 peak_window=PEAK_WINDOW, ma_peak_threshold=MA_PEAK_THRESHOLD, ma_long_for_peak=MA_LONG_PERIOD_FOR_PEAK):
+        super().__init__(name=f"MAPullbackPeakCondition({ma_short},{ma_long},{pullback_pct*100:.0f}%)", timeframe=timeframe)
         self.ma_short = ma_short
         self.ma_long = ma_long
         self.pullback_pct = pullback_pct
-        self.trend_window = trend_window # 用于判断 MA_long 趋势的窗口
+        self.trend_window = trend_window
+        self.peak_window = peak_window
+        self.ma_peak_threshold = ma_peak_threshold
+        self.ma_long_for_peak = ma_long_for_peak
 
-    # --- 复用 multi_level_cross_strategy_new.py 中的辅助方法 ---
-    # (确保这些方法已复制到此类中或通过继承/组合可用)
 
     def calculate_ma(self, df: pd.DataFrame, ma_list: List[int]) -> pd.DataFrame:
-        """计算各种均线"""
         if df is None or df.empty or 'close' not in df.columns:
              logger.warning("Cannot calculate MA: DataFrame is empty or missing 'close' column.")
              return pd.DataFrame(columns=df.columns.tolist() + [f'MA{ma}' for ma in ma_list] if df is not None else [f'MA{ma}' for ma in ma_list])
@@ -75,7 +68,6 @@ class MAPullbackStrategy(BaseStrategy):
         return df_copy
 
     def is_ma_trending_up(self, ma_series: pd.Series, window: int = 5) -> Optional[bool]:
-        """判断均线是否走平或向上, 返回 None 表示无法判断"""
         if ma_series is None: logger.debug("MA series is None."); return None
         valid_series = ma_series.dropna()
         if len(valid_series) < 2: logger.debug(f"Need >= 2 points for trend ({len(valid_series)} found)."); return None
@@ -84,12 +76,11 @@ class MAPullbackStrategy(BaseStrategy):
         x = np.arange(effective_window); y = valid_series[-effective_window:].values
         try:
             coeffs = np.polyfit(x, y, 1); slope = coeffs[0]
-            return slope >= -1e-6 # 允许极小的负斜率
+            return slope >= -1e-6
         except (np.linalg.LinAlgError, ValueError) as e:
             logger.warning(f"Could not fit trendline: {e}"); return None
 
     def _safe_get_value(self, report_data: Optional[Dict], key: str) -> Optional[float]:
-        # ... (代码同 multi_level_cross_strategy_new.py) ...
         if report_data is None: return None
         if key not in report_data: return None
         value = report_data[key]
@@ -103,7 +94,7 @@ class MAPullbackStrategy(BaseStrategy):
             return None
 
     def get_fundamental_data(self, symbol: str, signal_date_str: str) -> Dict[str, Any]:
-        # ... (代码完全同 multi_level_cross_strategy_new.py 的 get_fundamental_data) ...
+        # ... (This function remains the same as in your provided code) ...
         fundamental_results = {
             'net_profit_positive_3y_latest': None, 'pe': np.nan, 'pe_lt_30': None,
             'revenue_growth_yoy': np.nan, 'profit_growth_yoy': np.nan, 'growth_positive': None,
@@ -149,14 +140,14 @@ class MAPullbackStrategy(BaseStrategy):
             else:
                 if latest_report:
                     profit = self._safe_get_value(latest_report.get('data'), NET_PROFIT_FIELD); periods_checked.append(latest_report['report_date'])
-                    if profit is None or profit <= 1e-6: all_profits_positive = False; # logger.info(f"[{symbol}] Latest report profit ({profit}) not positive.")
+                    if profit is None or profit <= 1e-6: all_profits_positive = False;
                 if all_profits_positive:
                     sorted_annuals = sorted(annual_reports_last_3y, key=lambda x: x['report_date'], reverse=True); reports_to_check_annual = sorted_annuals[:required_annuals]
                     for report in reports_to_check_annual:
                          report_date = report['report_date'];
                          if report_date in periods_checked: continue
                          profit = self._safe_get_value(report.get('data'), NET_PROFIT_FIELD); periods_checked.append(report_date)
-                         if profit is None or profit <= 1e-6: all_profits_positive = False; # logger.info(f"[{symbol}] Annual report ({report_date}) profit ({profit}) not positive.");
+                         if profit is None or profit <= 1e-6: all_profits_positive = False;
                          break
             fundamental_results['net_profit_positive_3y_latest'] = all_profits_positive
             if pd.notna(market_cap) and latest_annual_report:
@@ -165,7 +156,7 @@ class MAPullbackStrategy(BaseStrategy):
                     pe = market_cap / latest_annual_profit; fundamental_results['pe'] = pe; fundamental_results['pe_lt_30'] = pe < PE_THRESHOLD
                 else: error_reasons.append(f"Invalid Annual Profit ({latest_annual_profit}) for PE")
             else:
-                if pd.isna(market_cap) and "Market Cap" not in " ".join(error_reasons):pass# logger.warning(f"[{symbol}] Market cap is NaN.")
+                if pd.isna(market_cap) and "Market Cap" not in " ".join(error_reasons):pass
                 if not latest_annual_report and "Annual Report" not in " ".join(error_reasons): error_reasons.append("Missing Annual Report for PE")
             growth_positive = None; rev_growth = np.nan; prof_growth = np.nan
             if latest_report and prev_year_q_report:
@@ -195,112 +186,142 @@ class MAPullbackStrategy(BaseStrategy):
         if error_reasons: fundamental_results['error_reason'] = "; ".join(sorted(list(set(error_reasons))))
         return fundamental_results
 
-    # --- 新策略的核心逻辑 ---
+    def find_recent_valid_peak(self, df: pd.DataFrame, current_index: int, ma_long_col: str) -> Optional[float]:
+        """
+        Finds the most recent peak before current_index that satisfies the condition:
+        peak_price >= MA_long_for_peak * ma_peak_threshold (e.g., peak >= MA30 * 1.20)
+        """
+        if current_index < self.peak_window:
+            return None
+
+        # Consider data up to (but not including) the current_index for finding prior peaks
+        historical_df = df.iloc[:current_index]
+        if len(historical_df) < self.peak_window:
+            return None
+
+        # Calculate rolling max for 'high' prices to identify peaks
+        historical_df['rolling_peak'] = historical_df['high'].rolling(window=self.peak_window, center=True).max()
+
+        # Iterate backwards from the point before current_index
+        for i in range(len(historical_df) - 1, self.peak_window - 2, -1): # Ensure there's enough data for rolling_peak
+            potential_peak_price = historical_df['high'].iloc[i]
+            # Check if this point is a rolling peak
+            if pd.notna(historical_df['rolling_peak'].iloc[i]) and potential_peak_price == historical_df['rolling_peak'].iloc[i]:
+                # This is a peak according to the rolling window
+                ma_at_peak_time = historical_df[ma_long_col].iloc[i]
+                if pd.notna(ma_at_peak_time) and ma_at_peak_time > 0:
+                    if potential_peak_price >= ma_at_peak_time * self.ma_peak_threshold:
+                        logger.debug(f"Valid peak found at {historical_df['date'].iloc[i]}: Price {potential_peak_price:.2f}, MA{self.ma_long_for_peak} {ma_at_peak_time:.2f} (Threshold: {self.ma_peak_threshold})")
+                        return potential_peak_price # Return the price of the valid peak
+        return None
+
+
     def find_pullback_signals_on_last_day(self, df_with_ma: pd.DataFrame) -> List[Dict]:
-        """
-        在带有均线的 DataFrame 上，检查最后一天是否满足回踩买入条件。
-        """
         signals = []
-        if df_with_ma is None or df_with_ma.empty or len(df_with_ma) < self.trend_window:
-            # logger.debug("DataFrame empty or too short for pullback check.")
+        if df_with_ma is None or df_with_ma.empty or len(df_with_ma) < max(self.trend_window, self.ma_long, self.ma_long_for_peak):
             return signals
 
-        # 获取所需的列名
         ma_short_col = f'MA{self.ma_short}'
         ma_long_col = f'MA{self.ma_long}'
-        required_cols = ['close', ma_short_col, ma_long_col, 'date', 'symbol']
+        ma_long_for_peak_col = f'MA{self.ma_long_for_peak}' # MA used for peak condition
 
-        if not all(col in df_with_ma.columns for col in required_cols):
-            missing = [c for c in required_cols if c not in df_with_ma.columns]
-            logger.warning(f"Missing columns for pullback check: {missing}")
+        # Ensure all necessary MAs are calculated
+        # The MA for peak condition might be different from the pullback MA (e.g. MA30 for both)
+        # For this request, it's specified as 30-day line (ma_long_for_peak)
+        all_ma_periods = list(set([self.ma_short, self.ma_long, self.ma_long_for_peak]))
+        df_with_all_mas = self.calculate_ma(df_with_ma.copy(), all_ma_periods) # Use a copy
+
+        if df_with_all_mas.empty: return signals
+
+
+        required_cols = ['close', 'high', ma_short_col, ma_long_col, ma_long_for_peak_col, 'date', 'symbol']
+        if not all(col in df_with_all_mas.columns for col in required_cols):
+            missing = [c for c in required_cols if c not in df_with_all_mas.columns]
+            logger.warning(f"Missing columns for pullback check: {missing} in df_with_all_mas. Columns are: {df_with_all_mas.columns.tolist()}")
             return signals
 
-        # 获取最后一行数据
-        last = df_with_ma.iloc[-1]
+        last = df_with_all_mas.iloc[-1]
+        current_df_index_for_last_day = len(df_with_all_mas) -1
 
-        # 检查最后一行数据是否有效
         if last[required_cols].isnull().any():
-            # logger.debug(f"Last row contains NaN in required columns: {last.to_dict()}")
             return signals
 
-        # --- 条件判断 ---
-        # 1. MA_long 趋势判断 (使用指定窗口)
-        ma_long_series = df_with_ma[ma_long_col]
-        is_trend_up = self.is_ma_trending_up(ma_long_series, window=self.trend_window)
-        if is_trend_up is None or not is_trend_up: # 如果无法判断或趋势向下/走平不严格，则不满足
-            # logger.debug(f"Condition 1 Fail: MA{self.ma_long} trend not up or flat (Trend check result: {is_trend_up}).")
+        # 1. Previous Peak Condition (NEW)
+        # We pass df_with_all_mas to ensure the correct MA (ma_long_for_peak_col) is used inside find_recent_valid_peak
+        valid_prior_peak = self.find_recent_valid_peak(df_with_all_mas, current_df_index_for_last_day, ma_long_for_peak_col)
+        if valid_prior_peak is None:
+            logger.debug(f"Condition 0 Fail: No recent valid peak found meeting criteria (Peak Price >= MA{self.ma_long_for_peak} * {self.ma_peak_threshold}).")
             return signals
 
-        # 2. 股价 > MA_long
+        # 2. MA_long (e.g., MA30 for pullback) trend判断
+        ma_long_series_for_trend = df_with_all_mas[ma_long_col]
+        is_trend_up = self.is_ma_trending_up(ma_long_series_for_trend, window=self.trend_window)
+        if is_trend_up is None or not is_trend_up:
+            return signals
+
+        # 3. 股价 > MA_long (pullback MA)
         cond2_price_above_ma_long = last['close'] > last[ma_long_col]
         if not cond2_price_above_ma_long:
-            # logger.debug(f"Condition 2 Fail: Close {last['close']:.2f} <= MA{self.ma_long} {last[ma_long_col]:.2f}.")
             return signals
 
-        # 3. MA_short > MA_long
+        # 4. MA_short > MA_long (pullback MA)
         cond3_ma_short_above_ma_long = last[ma_short_col] > last[ma_long_col]
         if not cond3_ma_short_above_ma_long:
-            # logger.debug(f"Condition 3 Fail: MA{self.ma_short} {last[ma_short_col]:.2f} <= MA{self.ma_long} {last[ma_long_col]:.2f}.")
             return signals
 
-        # 4. 股价回踩 MA_long (在 MA_long 之上，且距离不超过 pullback_pct)
-        # 确保 MA_long 不为 0 或负数
+        # 5. 股价回踩 MA_long (pullback MA)
         if last[ma_long_col] <= 1e-6:
-            # logger.debug(f"Condition 4 Fail: MA{self.ma_long} is zero or negative ({last[ma_long_col]:.2f}).")
             return signals
         pullback_check = (last['close'] >= last[ma_long_col]) and \
                          ((last['close'] - last[ma_long_col]) / last[ma_long_col] <= self.pullback_pct)
         if not pullback_check:
-            # diff_pct = ((last['close'] - last[ma_long_col]) / last[ma_long_col]) * 100
-            # logger.debug(f"Condition 4 Fail: Pullback condition not met (Close={last['close']:.2f}, MA={last[ma_long_col]:.2f}, Diff={diff_pct:.2f}% > {self.pullback_pct*100:.0f}% or Close < MA).")
             return signals
 
-        # --- 所有条件满足 ---
-        logger.info(f"✅ [{last['symbol']}] MAPullback Signal on {pd.to_datetime(last['date']).strftime('%Y-%m-%d')}: TrendOK={is_trend_up}, Close>MA{self.ma_long}, MA{self.ma_short}>MA{self.ma_long}, PullbackOK.")
+        logger.info(f"✅ [{last['symbol']}] MAPullbackPeakCond Signal on {pd.to_datetime(last['date']).strftime('%Y-%m-%d')}: ValidPeakFound, TrendOK, Close>MA{self.ma_long}, MA{self.ma_short}>MA{self.ma_long}, PullbackOK.")
         signals.append({
             "symbol": last['symbol'],
             "signal_date": pd.to_datetime(last['date']).strftime('%Y-%m-%d'),
             "strategy": self.name,
-            # timeframe 会在 process_level 中添加
         })
         return signals
 
 
-    # --- 多周期处理框架 (类似 multi_level_cross_strategy_new.py) ---
     def process_level(self, symbol: str, start_date: str, end_date: str, level: str) -> List[Dict]:
-        """处理单个级别（日、周、月）的信号检测"""
         logger.debug(f"[{symbol}] Processing {level} level from {start_date} to {end_date}")
 
-        # 确定该级别所需的均线
-        ma_periods = [self.ma_short, self.ma_long]
-        # 确定判断趋势所需的窗口长度 (可以根据 level 调整)
-        trend_check_window = self.trend_window
-        if level == 'weekly': trend_check_window = max(4, self.trend_window) # 周线至少看4周
-        if level == 'monthly': trend_check_window = max(3, self.trend_window) # 月线至少看3月
+        # For this strategy, MA30 is specifically mentioned for the peak condition.
+        # The pullback itself uses self.ma_long (which defaults to 30 but could be configured).
+        # We need to ensure MA30 data is available for the peak check, regardless of the level's self.ma_long.
+        # For weekly/monthly, MA30 will be calculated based on weekly/monthly resampled data.
+        # The primary "30-day line" for the peak refers to the MA on the *current level's data*.
 
-        # 1. 加载日线数据 (包含所有需要的列)
+        trend_check_window = self.trend_window
+        if level == 'weekly': trend_check_window = max(4, self.trend_window)
+        if level == 'monthly': trend_check_window = max(3, self.trend_window)
+
         required_fields = ["date", "open", "close", "high", "low", "volume"]
         df_daily = load_daily_data(symbol, start_date, end_date, fields=required_fields)
         if df_daily is None or df_daily.empty:
              logger.warning(f"[{symbol}] No daily data loaded for level {level}.")
              return []
-        df_daily['symbol'] = symbol # 确保有 symbol 列
+        df_daily['symbol'] = symbol
 
-        # 2. 根据 level 重采样
         df_level_data = df_daily.copy()
         if level == "weekly":
-            min_days_for_resample = 5 * max(self.ma_long, trend_check_window) # 粗略估计需要的天数
-            if len(df_level_data) < min_days_for_resample:
-                logger.debug(f"[{symbol}] Not enough data ({len(df_level_data)} days) for weekly resampling and MA/trend calculation.")
+            # Ensure enough data for the longest MA period (self.ma_long or self.ma_long_for_peak) on weekly.
+            # E.g., if ma_long_for_peak is 30 (weeks), we need 30 * 5 = 150 daily bars approx.
+            min_periods_needed = max(self.ma_long, self.ma_long_for_peak, trend_check_window)
+            if len(df_level_data) < 5 * min_periods_needed : # Rough estimate
+                logger.debug(f"[{symbol}] Not enough daily data for weekly resampling and MA calculation (needs ~{5*min_periods_needed} days).")
                 return []
             agg = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum', 'symbol': 'last'}
             try:
                 df_level_data = df_daily.set_index('date').resample('W-FRI', closed='right', label='right').agg(agg).dropna(how='all').reset_index()
             except Exception as e: logger.error(f"[{symbol}] Error weekly resampling: {e}", exc_info=True); return []
         elif level == "monthly":
-            min_days_for_resample = 20 * max(self.ma_long, trend_check_window) # 粗略估计
-            if len(df_level_data) < min_days_for_resample:
-                 logger.debug(f"[{symbol}] Not enough data ({len(df_level_data)} days) for monthly resampling and MA/trend calculation.")
+            min_periods_needed = max(self.ma_long, self.ma_long_for_peak, trend_check_window)
+            if len(df_level_data) < 20 * min_periods_needed: # Rough estimate
+                 logger.debug(f"[{symbol}] Not enough daily data for monthly resampling and MA calculation (needs ~{20*min_periods_needed} days).")
                  return []
             agg = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum', 'symbol': 'last'}
             try:
@@ -311,27 +332,19 @@ class MAPullbackStrategy(BaseStrategy):
             logger.warning(f"[{symbol}] Resampled {level} DataFrame empty.")
             return []
 
-        # 3. 计算均线
-        df_with_ma = self.calculate_ma(df_level_data, ma_periods)
-        if df_with_ma.empty:
-            logger.warning(f"[{symbol}] DataFrame empty after MA calculation for {level}.")
-            return []
+        # Calculate all MAs needed: short, long (for pullback), and long_for_peak
+        # The `find_pullback_signals_on_last_day` will internally call `calculate_ma`
+        # with all necessary periods if they are not already present.
+        # So, we can just pass df_level_data.
+        signals = self.find_pullback_signals_on_last_day(df_level_data) # Pass the resampled data
 
-        # 4. 调用信号检测逻辑 (只检测最后一天)
-        signals = self.find_pullback_signals_on_last_day(df_with_ma)
-
-        # 5. 添加 timeframe
         for sig in signals:
             sig['timeframe'] = level
         return signals
 
     def find_signals(self, symbol: str, start_date: str, end_date: str) -> Dict[str, List[Dict]]:
-        """
-        统一接口，扫描日线、周线、月线的回踩信号。
-        """
-        logger.info(f"🔍 [{symbol}] Scanning for MA Pullback from {start_date} to {end_date}")
+        logger.info(f"🔍 [{symbol}] Scanning for MA Pullback with Peak Condition from {start_date} to {end_date}")
         results = {}
-        # 决定要运行哪些级别，如果 self.timeframe 是 'multi' 就全跑
         levels_to_run = ['daily', 'weekly', 'monthly'] if self.timeframe == 'multi' else [self.timeframe]
 
         for level in levels_to_run:
@@ -339,32 +352,31 @@ class MAPullbackStrategy(BaseStrategy):
                 logger.warning(f"Unsupported timeframe '{level}' requested. Skipping.")
                 continue
             try:
+                # Pass the ma_long_for_peak to process_level if needed,
+                # or ensure it's handled within find_pullback_signals_on_last_day
                 results[level] = self.process_level(symbol, start_date, end_date, level=level)
-                logger.info(f"[{symbol}] Found {len(results.get(level,[]))} signals for {level} level.")
+                logger.info(f"[{symbol}] Found {len(results.get(level,[]))} signals for {level} level with peak condition.")
             except Exception as e:
                  logger.error(f"[{symbol}] Error processing {level} level: {e}", exc_info=True)
-                 results[level] = [] # 出错则该级别无信号
+                 results[level] = []
         return results
 
 
-# --- Main Execution Block (`if __name__ == "__main__":`) ---
 if __name__ == "__main__":
-    strategy = MAPullbackStrategy() # 实例化新策略
+    # Note: ma_long_for_peak defaults to 30 in the constructor
+    strategy = MAPullbackStrategy(ma_short=5, ma_long=30, pullback_pct=0.05, trend_window=5, ma_long_for_peak=30)
     engine = get_engine_instance()
 
     if engine is None: logger.critical("DB engine NG. Exit."); exit()
 
-    # 1. 获取股票列表 (与之前类似)
     try:
-        # stock_query = "SELECT code as symbol FROM stock_list WHERE code like '00%' LIMIT 20" # DEBUG: 限制范围
-        stock_query = "SELECT code as symbol FROM stock_list" # 正式运行
+        stock_query = "SELECT code as symbol FROM stock_list" # Consider LIMIT for testing
         df_stocks = pd.read_sql(stock_query, con=engine)
         stock_list = df_stocks['symbol'].tolist()
         logger.info(f"📈 Stocks to process: {len(stock_list)}")
         if not stock_list: logger.warning("Stock list empty."); exit()
     except Exception as e: logger.error(f"Failed to get stock list: {e}", exc_info=True); exit()
 
-    # 2. 获取日期范围 (与之前类似)
     try:
         date_query = "SELECT MAX(date) AS max_date FROM stock_daily"
         df_dates = pd.read_sql(date_query, con=engine)
@@ -373,13 +385,12 @@ if __name__ == "__main__":
              logger.warning(f"Using current date {end_date_obj.strftime('%Y-%m-%d')} as end date.")
         else: end_date_obj = pd.to_datetime(df_dates.at[0, 'max_date']).date()
         end_date = end_date_obj.strftime('%Y-%m-%d')
-        # 需要足够长的历史数据来计算 MA30 和趋势
-        start_date = (end_date_obj - pd.DateOffset(years=2)).strftime('%Y-%m-%d') # 至少2年数据
+        # For MA30 and peak window, might need more history
+        start_date = (end_date_obj - pd.DateOffset(years=3)).strftime('%Y-%m-%d') # Approx 3 years
         logger.info(f"📅 Analysis period: {start_date} to {end_date}")
         logger.info(f"🛎 Filtering signals ONLY on: {end_date}")
     except Exception as e: logger.error(f"Failed to get date range: {e}", exc_info=True); exit()
 
-    # --- 开始扫描 ---
     initial_signals = []
     processed_count = 0
     total_stocks = len(stock_list)
@@ -387,13 +398,11 @@ if __name__ == "__main__":
 
     for symbol in stock_list:
         processed_count += 1
-        if processed_count % 100 == 0: # 每处理100只股票打印一次进度
+        if processed_count % 100 == 0:
             logger.info(f"--- Scanning {processed_count}/{total_stocks}: {symbol} ---")
 
         try:
-            # 获取该股票所有周期的技术信号
             results = strategy.find_signals(symbol, str(start_date), str(end_date))
-            # 收集发生在最后一天的信号
             for level, signals_in_level in results.items():
                 for sig in signals_in_level:
                     if sig['signal_date'] == end_date:
@@ -401,7 +410,7 @@ if __name__ == "__main__":
                         initial_signals.append({
                             "symbol": symbol,
                             "signal_date": sig['signal_date'],
-                            "strategy": strategy.name, # 使用新策略的名称
+                            "strategy": strategy.name,
                             "timeframe": level
                         })
         except Exception as e:
@@ -410,7 +419,6 @@ if __name__ == "__main__":
     scan_end_time = time.time()
     logger.info(f"\n📊 Found {len(initial_signals)} initial technical signals ({strategy.name}) on {end_date}. Scan took {scan_end_time - scan_start_time:.2f}s.")
 
-    # --- 基本面分析 ---
     final_enhanced_signals = []
     if initial_signals:
         logger.info("\n🔬 Starting fundamental analysis...")
@@ -422,16 +430,11 @@ if __name__ == "__main__":
             fundamental_processed_count += 1
             symbol = initial_sig['symbol']
             signal_date_str = initial_sig['signal_date']
-            # logger.info(f"--- Fund Analysis {fundamental_processed_count}/{total_initial}: {symbol} on {signal_date_str} ---")
 
-            # 调用基本面数据获取与分析函数
             fundamental_data = strategy.get_fundamental_data(symbol, signal_date_str)
-
-            # 合并技术信号和基本面结果
             enhanced_sig = {**initial_sig, **fundamental_data}
             final_enhanced_signals.append(enhanced_sig)
 
-            # 打印简要基本面结果
             error_msg = enhanced_sig.get('error_reason')
             error_str = f", Errors='{error_msg}'" if error_msg else ""
             logger.info(f"-> Fund Results {symbol} ({initial_sig['timeframe']}): PE={enhanced_sig.get('pe', np.nan):.2f}, PE<30={enhanced_sig.get('pe_lt_30')}, Growth+={enhanced_sig.get('growth_positive')}, PEG<1={enhanced_sig.get('peg_like_lt_1')}, 3YProfit+={enhanced_sig.get('net_profit_positive_3y_latest')}{error_str}")
@@ -439,31 +442,29 @@ if __name__ == "__main__":
         fund_end_time = time.time()
         logger.info(f"Fundamental analysis took {fund_end_time - fund_start_time:.2f}s.")
 
-    # --- 保存结果 ---
     if final_enhanced_signals:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         output_dir = os.path.join(script_dir, '..', 'output')
         try: os.makedirs(output_dir, exist_ok=True)
         except OSError as ose: logger.error(f"Cannot create output dir {output_dir}: {ose}"); output_dir = "."
 
-        columns_order = [ # 与之前保持一致
+        columns_order = [
             'symbol', 'signal_date', 'strategy', 'timeframe',
             'net_profit_positive_3y_latest', 'pe', 'pe_lt_30',
             'revenue_growth_yoy', 'profit_growth_yoy', 'growth_positive',
             'peg_like_ratio', 'peg_like_lt_1', 'error_reason'
         ]
         df_final = pd.DataFrame(final_enhanced_signals)
-        for col in columns_order: # 确保列存在
+        for col in columns_order:
             if col not in df_final.columns: df_final[col] = np.nan
-        df_final = df_final[columns_order] # 排序
+        df_final = df_final[columns_order]
 
-        # 格式化输出
         float_cols = ['pe', 'revenue_growth_yoy', 'profit_growth_yoy', 'peg_like_ratio']
         for col in float_cols:
              if col in df_final.columns:
                   df_final[col] = df_final[col].apply(lambda x: f"{x:.4f}" if pd.notna(x) and np.isfinite(x) and isinstance(x, (int, float)) else ('+Inf' if x == np.inf else ('-Inf' if x == -np.inf else None)))
 
-        filename = os.path.join(output_dir, f"signals_{strategy.name}_with_fundamentals_{end_date}.csv") # 文件名包含策略名
+        filename = os.path.join(output_dir, f"signals_{strategy.name}_with_fundamentals_{end_date}.csv")
         try:
             df_final.to_csv(filename, index=False, encoding='utf-8-sig')
             logger.info(f"\n✅ Final signals saved to: {filename}")
