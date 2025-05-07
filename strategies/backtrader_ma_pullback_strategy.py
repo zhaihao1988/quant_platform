@@ -199,6 +199,14 @@ class MAPullbackPeakCondBtStrategy(bt.Strategy):
         # ... (next 方法中的买卖逻辑不变，使用Backtrader API和数据访问) ...
         current_date_str = self.datetime.date(0).isoformat();
         stock_name = self.data._name
+        # --- 日志记录特定股票和日期 ---
+        target_stock = '603920'
+        target_date = '2024-10-16'
+        do_specific_log = (stock_name == target_stock and current_date_str == target_date)
+
+        if do_specific_log:
+            self.log(f"--- Debugging {stock_name} on {current_date_str} ---")
+
         if len(self.ma_long) < 1 or len(self.ma_short) < 1: return
         if self.order: return  # 有挂单，不操作
 
@@ -277,27 +285,86 @@ class MAPullbackPeakCondBtStrategy(bt.Strategy):
 
         # Buy Logic
         else:  # No position
-            if len(self.ma_long) < self.params.trend_window or len(self.ma_short) < 1 or len(
-                self.ma_long_for_peak) < 1: return
+            if do_specific_log:
+                self.log(f"Entering BUY logic block.")
+                self.log(f"Len ma_long: {len(self.ma_long)}, trend_window: {self.params.trend_window}")
+                self.log(f"Len ma_short: {len(self.ma_short)}")
+                self.log(f"Len ma_long_for_peak: {len(self.ma_long_for_peak)}")
+
+            if len(self.ma_long) < self.params.trend_window or \
+                    len(self.ma_short) < 1 or \
+                    len(self.ma_long_for_peak) < 1:
+                if do_specific_log: self.log(f"Condition Fail: Not enough indicator history.")
+                return
             peak_low_data = self._find_signal_peak_and_low();
             prior_peak, recent_low = peak_low_data["prior_peak"], peak_low_data["recent_low"]
-            if prior_peak is None or recent_low is None: return
+            if do_specific_log:
+                self.log(f"Peak/Low Data: prior_peak={prior_peak}, recent_low={recent_low}")
+
+            if prior_peak is None or recent_low is None:
+                if do_specific_log: self.log(f"Condition Fail: prior_peak or recent_low is None.")
+                return
             is_trend_ok = False
-            if len(self.ma_long.get(size=self.params.trend_window + 1)) == self.params.trend_window + 1:
-                ma_long_series = pd.Series(self.ma_long.get(ago=1, size=self.params.trend_window))
+            trend_win = self.params.trend_window
+            ma_long_hist_values = self.ma_long.get(ago=1, size=trend_win)
+
+            if len(ma_long_hist_values) == trend_win:
+                ma_long_series = pd.Series(ma_long_hist_values)
                 if not ma_long_series.isnull().any():
                     try:
-                        coeffs = np.polyfit(np.arange(self.params.trend_window), ma_long_series.values[::-1],
-                                            1); slope = coeffs[0]; is_trend_ok = slope >= -1e-6
-                    except (np.linalg.LinAlgError, ValueError, TypeError):  # 添加了 TypeError
+                        x_domain = np.arange(trend_win)
+                        y_values = ma_long_series.values[::-1]
+                        if len(y_values) == len(x_domain):
+                            coeffs = np.polyfit(x_domain, y_values, 1)
+                            slope = coeffs[0]
+                            is_trend_ok = slope >= -1e-6  # 原来的条件是 >= 0，后改为 >= -1e-6
+                            if do_specific_log: self.log(f"Trend slope: {slope}, is_trend_ok: {is_trend_ok}")
+                        else:
+                            if do_specific_log: self.log(
+                                f"Trend check: Mismatched lengths for polyfit. X len: {len(x_domain)}, Y len: {len(y_values)}")
+                    except (np.linalg.LinAlgError, ValueError, TypeError) as e:
+                        if do_specific_log: self.log(f"Polyfit error: {e}")
                         pass
-            if not is_trend_ok: return
-            if self.dataclose[0] <= self.ma_long[0]: return
-            if self.ma_short[0] <= self.ma_long[0]: return
-            if self.ma_long[0] <= 1e-6: return
-            is_pullback = (self.dataclose[0] >= self.ma_long[0]) and (
-                        (self.dataclose[0] - self.ma_long[0]) / self.ma_long[0] <= self.params.pullback_pct)
-            if not is_pullback: return
+            else:
+                if do_specific_log: self.log(
+                    f"Trend check: Not enough ma_long_hist_values. Got {len(ma_long_hist_values)}, expected {trend_win}")
+
+            if not is_trend_ok:
+                if do_specific_log: self.log(f"Condition Fail: Trend is not OK (is_trend_ok={is_trend_ok}).")
+                return
+                # 当前收盘价、短均线、长均线的值
+                current_close = self.dataclose[0]
+                val_ma_short = self.ma_short[0]
+                val_ma_long = self.ma_long[0]
+                if do_specific_log:
+                    self.log(f"Close: {current_close:.2f}, MA_Short: {val_ma_short:.2f}, MA_Long: {val_ma_long:.2f}")
+
+                if current_close <= val_ma_long:
+                    if do_specific_log: self.log(
+                        f"Condition Fail: Close ({current_close:.2f}) <= MA_Long ({val_ma_long:.2f}).")
+                    return
+
+                if val_ma_short <= val_ma_long:
+                    if do_specific_log: self.log(
+                        f"Condition Fail: MA_Short ({val_ma_short:.2f}) <= MA_Long ({val_ma_long:.2f}).")
+                    return
+
+                if val_ma_long <= 1e-6:  # 避免除零或过小值
+                    if do_specific_log: self.log(f"Condition Fail: MA_Long ({val_ma_long:.2f}) is too small.")
+                    return
+
+                pullback_val = (current_close - val_ma_long) / val_ma_long if val_ma_long > 1e-6 else float('inf')
+                is_pullback = (current_close >= val_ma_long) and (pullback_val <= self.params.pullback_pct)
+
+                if do_specific_log:
+                    self.log(
+                        f"Pullback check: current_close ({current_close:.2f}) >= MA_Long ({val_ma_long:.2f}) is {current_close >= val_ma_long}")
+                    self.log(f"Pullback value: {pullback_val:.4f}, pullback_pct_param: {self.params.pullback_pct:.4f}")
+                    self.log(f"Is_pullback: {is_pullback}")
+
+                if not is_pullback:
+                    if do_specific_log: self.log(f"Condition Fail: Not a pullback (is_pullback={is_pullback}).")
+                    return
             # --- Buy conditions met ---
             self.log(f'BUY SIGNAL on {current_date_str}')
             self._pending_buy_info = {"prior_peak": prior_peak, "recent_low": recent_low}
