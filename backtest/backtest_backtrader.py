@@ -22,6 +22,7 @@ def load_data_from_db(symbol, start_date_str, end_date_str):
     """
     从 PostgreSQL 数据库加载数据并转换为 Backtrader Feed 格式。
     """
+
     print(f"Loading data for {symbol} from DB ({start_date_str} to {end_date_str})...")
 
     db_url = settings.DB_URL  # 从配置文件获取数据库连接字符串
@@ -48,7 +49,12 @@ def load_data_from_db(symbol, start_date_str, end_date_str):
                 "start_date": start_date_str,
                 "end_date": end_date_str
             }, index_col='date', parse_dates=['date'])
-
+        # 在 backtest/backtest_backtrader.py 的 load_data_from_db 函数中
+        # ...
+        if not dataframe.empty:
+            print(
+                f"INFO: For symbol {symbol}, actual data in DataFrame from {dataframe.index.min()} to {dataframe.index.max()}")  # <--- 确认这行已添加
+        # ...
         if dataframe.empty:
             print(f"No data found for {symbol} in DB for the specified date range.")
             return None
@@ -123,8 +129,9 @@ class MyCommissionInfo(bt.CommInfoBase):
 
 # --- 回测参数 ---
 STOCK_POOL = {
-    '000887': '中鼎股份', '300138': '晨光生物', '002480': '大金重工',
-    '002607': '胜宏科技', '603920': '世运电路'
+    #'000887': '中鼎股份', '300138': '晨光生物', '002480': '大金重工',
+    #'002607': '胜宏科技',
+    '603920': '世运电路'
 }
 START_DATE_STR = "2010-01-01"
 END_DATE_STR = "2025-05-07"

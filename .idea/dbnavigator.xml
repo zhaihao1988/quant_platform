@@ -31,6 +31,7 @@
   </component>
   <component name="DBNavigator.Project.DatasetFilterManager">
     <filter-actions connection-id="650e8030-ea32-4154-a2a9-adac579e0ba5" dataset="public.stock_disclosure" active-filter-id="" />
+    <filter-actions connection-id="650e8030-ea32-4154-a2a9-adac579e0ba5" dataset="public.stock_daily" active-filter-id="" />
   </component>
   <component name="DBNavigator.Project.ExecutionManager">
     <retain-sticky-names value="false" />
