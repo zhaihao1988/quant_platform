@@ -3,391 +3,477 @@ import backtrader as bt
 import backtrader.indicators as btind
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import math
+from collections import deque, namedtuple
 
 try:
     import talib
-
     TALIB_AVAILABLE = True
 except ImportError:
     TALIB_AVAILABLE = False
     print("WARN: TA-Lib not found, MACD and ATR related logic will be disabled or use Backtrader's approximation.")
 
+# --- Data Structures ---
+KLineRaw = namedtuple('KLineRaw', ['dt', 'o', 'h', 'l', 'c', 'idx'])
+MergedKLine = namedtuple('MergedKLine', ['dt', 'o', 'h', 'l', 'c', 'idx', 'direction', 'high_idx', 'low_idx'])
+Fractal = namedtuple('Fractal', ['kline', 'm_idx', 'type'])
+Stroke = namedtuple('Stroke', ['start_fractal', 'end_fractal', 'direction'])
 
 class MAPullbackPeakCondBtStrategy(bt.Strategy):
     params = (
         ('ma_short', 5),
-        ('ma_long', 30),
-        ('pullback_pct', 0.05),
-        ('trend_window', 5),
-        ('peak_window', 5),
-        ('ma_peak_threshold', 1.25),
-        ('ma_long_for_peak', 30),
+        ('ma_long', 30), # Daily MA period
+        ('ma_peak_threshold', 1.30), # Peak must be >= ma_long_for_peak * threshold
+        ('ma_long_for_peak', 30), # MA period used for peak threshold check
         ('atr_period', 14),
         ('atr_multiplier', 2.0),
-        ('sell_ma30_pct', 0.03),
-        ('sell_volume_ratio', 1.5),
+        ('sell_ma30_pct', 0.03), # Hard stop loss % below daily MA30
         ('macd_fast', 12),
         ('macd_slow', 26),
         ('macd_signal', 9),
         ('printlog', True),
-        ('max_position_ratio', 0.20)
+        ('max_position_ratio', 0.20),
+        ('weekly_ma_period', 30), # Weekly MA period
+        ('monthly_ma_period', 30), # Monthly MA period
+        ('fractal_lookback', 150), # Bars for K-line merging and stroke analysis
+        ('min_bars_between_fractals', 1) # Min merged K-lines between fractals for a stroke
     )
 
-    def log(self, txt, dt=None, doprint=False):
-        # ... (日志函数实现不变) ...
+    def log(self, txt, dt=None, doprint=False, data_feed=None):
+        """ Logging function w/ specific data feed context """
         if self.params.printlog or doprint:
-            dt = dt or self.datas[0].datetime.date(0)
-            print(f'{dt.isoformat()} [{self.data._name}], {txt}')
+            data = data_feed or self.datas[0]
+            try:
+                 dt = dt or data.datetime.date(0)
+                 log_prefix = f'{dt.isoformat()} [{data._name}]'
+            except (IndexError, AttributeError):
+                 log_prefix = f'????-??-?? [{data._name if hasattr(data,"_name") else "Unknown"}]'
+            print(f'{log_prefix}, {txt}')
 
     def __init__(self):
-        # ... (指标和状态变量初始化不变) ...
-        self.dataclose = self.data.close
-        self.datahigh = self.data.high
-        self.datalow = self.data.low
-        self.dataopen = self.data.open
-        self.datavolume = self.data.volume
-        self.datetime = self.data.datetime
+        # --- Indicators and State (per data feed) ---
+        self.ma_shorts = {}; self.ma_longs = {}; self.ma_longs_for_peak = {}
+        self.atrs = {}; self.macd_objs = {}; self.macd_hists = {}
+        self.positions_info = {}; self.atr_stop_loss_prices = {}; self.highest_highs_since_entry = {}
+        self.daily_bars_agg = {}; self.synthesized_weekly_data_agg = {}; self.synthesized_monthly_data_agg = {}
+        self.weekly_mas = {}; self.last_completed_weekly_ma = {}; self.monthly_mas = {}
+        self.current_week_open_dates = {}; self.current_week_data_agg = {}
+        self.current_month_open_dates = {}; self.current_month_data_agg = {}
 
-        self.ma_short = btind.SimpleMovingAverage(self.dataclose, period=self.params.ma_short)
-        self.ma_long = btind.SimpleMovingAverage(self.dataclose, period=self.params.ma_long)
-        if self.params.ma_long_for_peak == self.params.ma_long:
-            self.ma_long_for_peak = self.ma_long
-        else:
-            self.ma_long_for_peak = btind.SimpleMovingAverage(self.dataclose, period=self.params.ma_long_for_peak)
+        for d in self.datas:
+            dname = d._name
+            self.ma_shorts[dname] = btind.SimpleMovingAverage(d.close, period=self.params.ma_short)
+            self.ma_longs[dname] = btind.SimpleMovingAverage(d.close, period=self.params.ma_long)
+            self.ma_longs_for_peak[dname] = self.ma_longs[dname] if self.params.ma_long_for_peak == self.params.ma_long else btind.SimpleMovingAverage(d.close, period=self.params.ma_long_for_peak)
+            self.atrs[dname] = btind.AverageTrueRange(d, period=self.params.atr_period)
+            self.positions_info[dname] = {}
+            self.atr_stop_loss_prices[dname] = None; self.highest_highs_since_entry[dname] = None
+            self.daily_bars_agg[dname] = deque(maxlen=max(self.params.weekly_ma_period * 7, self.params.monthly_ma_period * 31) + 60)
+            self.synthesized_weekly_data_agg[dname] = deque(maxlen=self.params.weekly_ma_period + 5); self.synthesized_monthly_data_agg[dname] = deque(maxlen=self.params.monthly_ma_period + 5)
+            self.weekly_mas[dname] = None; self.last_completed_weekly_ma[dname] = None; self.monthly_mas[dname] = None
+            self.current_week_open_dates[dname] = None; self.current_week_data_agg[dname] = None
+            self.current_month_open_dates[dname] = None; self.current_month_data_agg[dname] = None
+            if TALIB_AVAILABLE:
+                self.macd_objs[dname] = btind.MACD(d.close, period_me1=self.params.macd_fast, period_me2=self.params.macd_slow, period_signal=self.params.macd_signal)
+                self.macd_hists[dname] = self.macd_objs[dname].macd - self.macd_objs[dname].signal
+            else: self.macd_objs[dname] = None; self.macd_hists[dname] = None
+        self.order = None; self._pending_buy_info = {}
 
-        self.atr = btind.AverageTrueRange(period=self.params.atr_period)
+    # --- Chanlun Helper Methods ---
+    def _merge_klines_chanlun(self, bars_data):
+        # (Keep as is)
+        if len(bars_data) < 2: return bars_data;
+        merged = []
+        if not bars_data: return merged
+        k1_raw = bars_data[0]; direction1 = 1 if k1_raw.c > k1_raw.o else (-1 if k1_raw.c < k1_raw.o else 0)
+        if direction1 == 0 and k1_raw.h != k1_raw.l: direction1 = 1 if k1_raw.c >= (k1_raw.h + k1_raw.l) / 2 else -1
+        k1 = MergedKLine(k1_raw.dt, k1_raw.o, k1_raw.h, k1_raw.l, k1_raw.c, k1_raw.idx, direction1, k1_raw.idx, k1_raw.idx)
+        merged.append(k1); last_unmerged_direction = direction1; i = 1
+        while i < len(bars_data):
+            k2_raw = bars_data[i]; k1 = merged[-1]
+            direction2 = 1 if k2_raw.c > k2_raw.o else (-1 if k2_raw.c < k2_raw.o else 0)
+            if direction2 == 0 and k2_raw.h != k2_raw.l: direction2 = 1 if k2_raw.c >= (k2_raw.h + k2_raw.l) / 2 else -1
+            k2 = MergedKLine(k2_raw.dt, k2_raw.o, k2_raw.h, k2_raw.l, k2_raw.c, k2_raw.idx, direction2, k2_raw.idx, k2_raw.idx)
+            k1_includes_k2 = k1.h >= k2.h and k1.l <= k2.l; k2_includes_k1 = k2.h >= k1.h and k2.l <= k1.l
+            if k1_includes_k2 or k2_includes_k1:
+                trend_direction = last_unmerged_direction
+                merged_h, merged_l = (max(k1.h, k2.h), max(k1.l, k2.l)) if trend_direction >= 0 else (min(k1.h, k2.h), min(k1.l, k2.l))
+                high_idx = k1.high_idx if merged_h == k1.h else k2.high_idx; low_idx = k1.low_idx if merged_l == k1.l else k2.low_idx
+                merged[-1] = MergedKLine(k2.dt, k1.o, merged_h, merged_l, k2.c, k2.idx, k1.direction, high_idx, low_idx)
+            else: merged.append(k2); last_unmerged_direction = k2.direction
+            i += 1
+        final_merged = []
+        for idx, k in enumerate(merged):
+            direction = k.direction
+            if direction == 0:
+                if idx > 0: prev_k = final_merged[-1]; direction = 1 if k.h > prev_k.h and k.l > prev_k.l else (-1 if k.h < prev_k.h and k.l < prev_k.l else prev_k.direction)
+                if direction == 0: direction = 1 if k.c >= k.o else -1
+            final_merged.append(MergedKLine(*k[:6], direction=direction, high_idx=k.high_idx, low_idx=k.low_idx))
+        return final_merged
 
-        if TALIB_AVAILABLE:
-            self.macd_obj = btind.MACD(self.dataclose, period_me1=self.params.macd_fast,
-                                       period_me2=self.params.macd_slow, period_signal=self.params.macd_signal)
-            self.macd_hist = self.macd_obj.macd - self.macd_obj.signal
-        else:
-            self.macd_obj = None; self.macd_hist = None
+    def _find_merged_fractal(self, merged_klines, index, fractal_type='top'):
+        # (Keep as is)
+        if not (1 <= index < len(merged_klines) - 1): return False
+        k_prev, k_curr, k_next = merged_klines[index-1], merged_klines[index], merged_klines[index+1]
+        if fractal_type == 'top': return k_curr.h > k_prev.h and k_curr.h > k_next.h
+        elif fractal_type == 'bottom': return k_curr.l < k_prev.l and k_curr.l < k_next.l
+        return False
 
-        self.order = None
-        self.position_info = {}
-        self.atr_stop_loss_price = None
-        self.highest_high_since_entry = None
-        self.take_profit_targets_hit = [False, False, False]
-        self.shares_sold_tp1 = 0
-        self.shares_sold_tp2 = 0
+    def _identify_all_merged_fractals(self, merged_klines):
+        # (Keep as is)
+        top_fractals, bottom_fractals = [], []
+        if len(merged_klines) < 3: return top_fractals, bottom_fractals
+        for i in range(1, len(merged_klines) - 1):
+            if self._find_merged_fractal(merged_klines, i, fractal_type='top'): top_fractals.append(Fractal(merged_klines[i], i, 'top'))
+            elif self._find_merged_fractal(merged_klines, i, fractal_type='bottom'): bottom_fractals.append(Fractal(merged_klines[i], i, 'bottom'))
+        return top_fractals, bottom_fractals
 
-    def notify_order(self, order):
-        # ... (订单通知处理逻辑不变) ...
-        dt_str = self.datetime.date(0).isoformat();
-        stock_name = self.data._name
-        if order.status in [order.Submitted, order.Accepted]: return
-        if order.status in [order.Completed]:
-            if order.isbuy():
-                self.log(
-                    f'BUY EXECUTED, Price: {order.executed.price:.2f}, Size: {order.executed.size}, Value: {order.executed.value:.2f}, Comm: {order.executed.comm:.2f}')
-                entry_price = order.executed.price;
-                initial_shares = order.executed.size
-                if hasattr(self, '_pending_buy_info'):
-                    peak_info = self._pending_buy_info;
-                    prior_peak = peak_info['prior_peak'];
-                    recent_low = peak_info['recent_low']
-                    tp1, tp2, tp3 = (prior_peak + recent_low) / 2, prior_peak, prior_peak + (entry_price - recent_low)
-                    self.position_info = {'entry_price': entry_price, 'initial_shares': initial_shares,
-                                          'shares_held': initial_shares, 'prior_peak': prior_peak,
-                                          'recent_low': recent_low, 'tp1': tp1, 'tp2': tp2, 'tp3': tp3}
-                    self.take_profit_targets_hit = [False, False, False];
-                    self.shares_sold_tp1 = 0;
-                    self.shares_sold_tp2 = 0
-                    self.highest_high_since_entry = self.datahigh[0]
-                    if TALIB_AVAILABLE and len(self.atr) > 1 and not np.isnan(self.atr[-1]):
-                        self.atr_stop_loss_price = entry_price - self.params.atr_multiplier * self.atr[-1];
-                        self.position_info['atr_stop_loss_price'] = self.atr_stop_loss_price; self.log(
-                            f'   Initial ATR Stop Loss set at: {self.atr_stop_loss_price:.2f} (ATR={self.atr[-1]:.2f})')
-                    else:
-                        self.atr_stop_loss_price = None; self.position_info['atr_stop_loss_price'] = None
-                    self.log(
-                        f'   Position Info Recorded: Peak={prior_peak:.2f}, Low={recent_low:.2f}, TP1={tp1:.2f}, TP2={tp2:.2f}, TP3={tp3:.2f}')
-                    del self._pending_buy_info
+    def _identify_strokes(self, merged_klines, top_fractals, bottom_fractals):
+        # (Keep as is)
+        strokes = []; all_fractals = sorted(top_fractals + bottom_fractals, key=lambda f: f.m_idx)
+        last_stroke_end_fractal = None; potential_start_fractal = None
+        for i in range(len(all_fractals)):
+            current_fractal = all_fractals[i]
+            if potential_start_fractal is None:
+                 if last_stroke_end_fractal is None or current_fractal.m_idx > last_stroke_end_fractal.m_idx: potential_start_fractal = current_fractal
+                 continue
+            if current_fractal.type != potential_start_fractal.type:
+                if current_fractal.m_idx - potential_start_fractal.m_idx - 1 >= self.params.min_bars_between_fractals:
+                    direction = 1 if potential_start_fractal.type == 'bottom' else -1
+                    strokes.append(Stroke(potential_start_fractal, current_fractal, direction))
+                    last_stroke_end_fractal = current_fractal; potential_start_fractal = current_fractal
                 else:
-                    self.log(f'ERROR: BUY EXECUTED for {stock_name} but _pending_buy_info not found!')
+                    if current_fractal.type=='top' and current_fractal.kline.h>=potential_start_fractal.kline.h: potential_start_fractal=current_fractal
+                    elif current_fractal.type=='bottom' and current_fractal.kline.l<=potential_start_fractal.kline.l: potential_start_fractal=current_fractal
+            else:
+                if current_fractal.type=='top' and current_fractal.kline.h>=potential_start_fractal.kline.h: potential_start_fractal=current_fractal
+                elif current_fractal.type=='bottom' and current_fractal.kline.l<=potential_start_fractal.kline.l: potential_start_fractal=current_fractal
+        return strokes
+
+    # --- MODIFIED: _find_prior_peak_stroke_info to return ORIGINAL peak date ---
+    def _find_prior_peak_stroke_info(self, data_feed):
+        """ Finds the latest upward stroke end (peak) meeting MA condition.
+            Returns info including original O/C/Date of the bar with the highest price. """
+        current_idx = len(data_feed) - 1; data_name = data_feed._name
+        peak_info = {"price": None, "bar_idx": None, "date": None, # This will be the ORIGINAL date
+                     "merged_kline": None, # Keep merged kline info if needed elsewhere
+                     "original_peak_open": None, "original_peak_close": None}
+        lookback = self.params.fractal_lookback
+        if current_idx < lookback + 2: return peak_info
+        raw_bars = [];
+        try:
+            dates=data_feed.datetime.get(ago=-1,size=lookback+1); opens=data_feed.open.get(ago=-1,size=lookback+1); highs=data_feed.high.get(ago=-1,size=lookback+1); lows=data_feed.low.get(ago=-1,size=lookback+1); closes=data_feed.close.get(ago=-1,size=lookback+1)
+            for i in range(len(dates)):
+                if any(math.isnan(val) for val in [opens[i], highs[i], lows[i], closes[i]]): continue
+                raw_bars.append(KLineRaw(bt.num2date(dates[i]).date(), opens[i],highs[i],lows[i],closes[i], current_idx-(len(dates)-1-i)))
+        except IndexError: return peak_info
+        if len(raw_bars) < 5: return peak_info
+        merged_klines = self._merge_klines_chanlun(raw_bars)
+        if len(merged_klines) < 5: return peak_info
+        top_fractals, bottom_fractals = self._identify_all_merged_fractals(merged_klines)
+        strokes = self._identify_strokes(merged_klines, top_fractals, bottom_fractals)
+        if not strokes: return peak_info
+        ma_line = self.ma_longs_for_peak[data_name].line
+        for stroke in reversed(strokes):
+            if stroke.direction == 1:
+                peak_fractal = stroke.end_fractal;
+                original_high_idx = peak_fractal.kline.high_idx # Get index of original high bar
+                ago = current_idx - original_high_idx
+                if ago >= 0 and ago < len(ma_line):
+                     ma_val = ma_line[-ago]
+                     if pd.notna(ma_val) and ma_val > 0 and peak_fractal.kline.h >= ma_val * self.params.ma_peak_threshold:
+                         # Fetch original O/C and Date using 'ago' derived from original_high_idx
+                         original_open = data_feed.open[-ago]
+                         original_close = data_feed.close[-ago]
+                         original_date = data_feed.datetime.date(-ago) # Fetch original date
+
+                         peak_info["price"] = peak_fractal.kline.h;
+                         peak_info["bar_idx"] = original_high_idx;
+                         peak_info["date"] = original_date # *** Use original date ***
+                         peak_info["merged_kline"] = peak_fractal.kline
+                         peak_info["original_peak_open"] = original_open
+                         peak_info["original_peak_close"] = original_close
+                         self.log(f"Found valid prior peak stroke: Peak Date={peak_info['date']}, H={peak_info['price']:.2f}", data_feed=data_feed, doprint=True) # Log using original date
+                         return peak_info
+        self.log("No valid prior peak stroke found meeting MA criteria.", data_feed=data_feed, doprint=True)
+        return peak_info
+
+    def _find_first_bottom_fractal_after_entry(self, data_feed, entry_bar_idx, current_bar_idx):
+        # (Keep previous version with enhanced logging)
+        data_name = data_feed._name
+        do_specific_log_local = (data_name == '603920' and data_feed.datetime.date(0).isoformat() >= '2024-10-17')
+        lookback_start = max(0, entry_bar_idx - 5)
+        if current_bar_idx < entry_bar_idx + 2 : return None
+        raw_bars = [];
+        try:
+            num_bars_needed = current_bar_idx - lookback_start + 1
+            dates=data_feed.datetime.get(ago=0, size=num_bars_needed); opens=data_feed.open.get(ago=0, size=num_bars_needed); highs=data_feed.high.get(ago=0, size=num_bars_needed); lows=data_feed.low.get(ago=0, size=num_bars_needed); closes=data_feed.close.get(ago=0, size=num_bars_needed)
+            for i in range(num_bars_needed):
+                if any(math.isnan(v) for v in [opens[i],highs[i],lows[i],closes[i]]): continue
+                raw_bars.append(KLineRaw(bt.num2date(dates[i]).date(), opens[i],highs[i],lows[i],closes[i], lookback_start + i ))
+        except IndexError: return None
+        if len(raw_bars) < 3 : return None
+        merged_klines = self._merge_klines_chanlun(raw_bars)
+        if len(merged_klines) < 3 : return None
+        if do_specific_log_local:
+            self.log(f"--- Finding bottom fractal after entry {entry_bar_idx} on {data_feed.datetime.date(0)} ---", data_feed=data_feed, doprint=True)
+            self.log(f"Analyzing {len(merged_klines)} merged klines:", data_feed=data_feed, doprint=True)
+            for mk in merged_klines[-10:]: self.log(f"  Merged: {mk.dt} O={mk.o:.2f} H={mk.h:.2f} L={mk.l:.2f} C={mk.c:.2f} OrigIdx={mk.idx} LowIdx={mk.low_idx}", data_feed=data_feed, doprint=True)
+        for j in range(1, len(merged_klines) - 1):
+            fractal_kline = merged_klines[j]
+            if fractal_kline.idx > entry_bar_idx:
+                is_bottom = self._find_merged_fractal(merged_klines, j, fractal_type='bottom')
+                if do_specific_log_local: self.log(f"  Checking merged kline index {j} (Date: {fractal_kline.dt}, OrigIdx: {fractal_kline.idx}) for bottom fractal: {is_bottom}", data_feed=data_feed, doprint=True)
+                if is_bottom:
+                    body_low = min(fractal_kline.o, fractal_kline.c) if pd.notna(fractal_kline.o) and pd.notna(fractal_kline.c) else np.nan
+                    fractal_info = {'date': fractal_kline.dt, 'price': fractal_kline.l, 'body_low': body_low, 'bar_idx': fractal_kline.low_idx, 'merged_kline_o': fractal_kline.o, 'merged_kline_c': fractal_kline.c}
+                    self.log(f"Found FIRST bottom fractal after entry: Date={fractal_info['date']}, L={fractal_info['price']:.2f}, BodyL={fractal_info['body_low']:.2f}, OrigBarIdx={fractal_info['bar_idx']}", data_feed=data_feed, doprint=True)
+                    return fractal_info
+        if do_specific_log_local: self.log(f"No confirmed bottom fractal found AFTER entry bar {entry_bar_idx} yet.", data_feed=data_feed, doprint=True)
+        return None
+
+    def _synthesize_higher_tf_data(self, data_feed):
+        # (Keep corrected version)
+        dname = data_feed._name
+        try:
+            current_date = data_feed.datetime.date(0); current_dt_obj = data_feed.datetime.datetime(0)
+            if len(data_feed.open)==0 or any(math.isnan(x) for x in [data_feed.open[0], data_feed.high[0], data_feed.low[0], data_feed.close[0]]): return
+            bar_data = {'date': current_date, 'datetime': current_dt_obj, 'open': data_feed.open[0], 'high': data_feed.high[0], 'low': data_feed.low[0], 'close': data_feed.close[0], 'volume': data_feed.volume[0] if pd.notna(data_feed.volume[0]) else 0.0}
+            self.daily_bars_agg[dname].append(bar_data)
+            current_iso_week = current_dt_obj.isocalendar(); current_week_num, current_year = current_iso_week[1], current_iso_week[0]
+            current_week_data = self.current_week_data_agg.get(dname); current_week_open_date = self.current_week_open_dates.get(dname)
+            is_new_week = (current_week_open_date is None or current_week_open_date.isocalendar()[1] != current_week_num or current_week_open_date.year != current_year)
+            if is_new_week:
+                if current_week_data:
+                    self.synthesized_weekly_data_agg[dname].append(current_week_data)
+                    synth_completed_weeks = list(self.synthesized_weekly_data_agg[dname])
+                    if len(synth_completed_weeks) >= self.params.weekly_ma_period:
+                        closes_completed = [b['close'] for b in synth_completed_weeks[-self.params.weekly_ma_period:] if pd.notna(b['close'])]
+                        if len(closes_completed) == self.params.weekly_ma_period:
+                             self.last_completed_weekly_ma[dname] = sum(closes_completed) / self.params.weekly_ma_period
+                self.current_week_open_dates[dname] = current_dt_obj; self.current_week_data_agg[dname] = {**bar_data, 'datetime_start': current_dt_obj, 'datetime_end': current_dt_obj}
+            elif current_week_data:
+                current_week_data['high']=max(current_week_data['high'], bar_data['high']); current_week_data['low']=min(current_week_data['low'], bar_data['low']); current_week_data['close']=bar_data['close']; current_week_data['volume']+=bar_data['volume']; current_week_data['datetime_end']=current_dt_obj
+            synth_weekly_data_list = list(self.synthesized_weekly_data_agg[dname]); current_w_data_dict = self.current_week_data_agg.get(dname)
+            if current_w_data_dict: synth_weekly_data_list.append(current_w_data_dict)
+            if len(synth_weekly_data_list) >= self.params.weekly_ma_period:
+                closes_for_ma = [b['close'] for b in synth_weekly_data_list[-self.params.weekly_ma_period:] if pd.notna(b['close'])]
+                if len(closes_for_ma) == self.params.weekly_ma_period: self.weekly_mas[dname]=sum(closes_for_ma)/self.params.weekly_ma_period
+                else: self.weekly_mas[dname]=np.nan
+            else: self.weekly_mas[dname]=np.nan
+            current_month_data = self.current_month_data_agg.get(dname); current_month_open_date = self.current_month_open_dates.get(dname)
+            is_new_month = (current_month_open_date is None or current_dt_obj.month != current_month_open_date.month or current_dt_obj.year != current_month_open_date.year)
+            if is_new_month:
+                 if current_month_data: self.synthesized_monthly_data_agg[dname].append(current_month_data)
+                 self.current_month_open_dates[dname] = current_dt_obj; self.current_month_data_agg[dname] = {**bar_data, 'datetime_start': current_dt_obj, 'datetime_end': current_dt_obj}
+            elif current_month_data: current_month_data['high']=max(current_month_data['high'], bar_data['high']); current_month_data['low']=min(current_month_data['low'], bar_data['low']); current_month_data['close']=bar_data['close']; current_month_data['volume']+=bar_data['volume']; current_month_data['datetime_end']=current_dt_obj
+            synth_monthly_data = list(self.synthesized_monthly_data_agg[dname]); current_m_data = self.current_month_data_agg.get(dname)
+            if current_m_data: synth_monthly_data.append(current_m_data)
+            if len(synth_monthly_data) >= self.params.monthly_ma_period:
+                closes = [b['close'] for b in synth_monthly_data[-self.params.monthly_ma_period:] if pd.notna(b['close'])]
+                if len(closes)==self.params.monthly_ma_period: self.monthly_mas[dname]=sum(closes)/self.params.monthly_ma_period
+                else: self.monthly_mas[dname]=np.nan
+            else: self.monthly_mas[dname]=np.nan
+        except Exception as e: self.log(f"Error synthesizing TFs for {dname}: {e}", data_feed=data_feed)
+
+
+    # --- MODIFIED: notify_order uses original O/C for body high ---
+    def notify_order(self, order):
+        data_feed = order.data; stock_name = data_feed._name
+        if order.status in [order.Submitted, order.Accepted]: return
+        if order.status == order.Completed:
+            if order.isbuy():
+                entry_price=order.executed.price; executed_size=order.executed.size; entry_bar_idx = len(data_feed)-1
+                self.log(f'BUY EXECUTED, Price: {entry_price:.2f}, Size: {executed_size}', data_feed=data_feed)
+                pos_info = self.positions_info[stock_name]
+                if hasattr(self, '_pending_buy_info') and stock_name in self._pending_buy_info:
+                    peak_data = self._pending_buy_info[stock_name]
+                    prior_peak_price = peak_data.get('price')
+                    # Use the original date from peak_info now
+                    prior_peak_date = peak_data.get('date', 'N/A')
+                    original_peak_open = peak_data.get('original_peak_open')
+                    original_peak_close = peak_data.get('original_peak_close')
+                    prior_peak_body_high = np.nan
+                    if pd.notna(original_peak_open) and pd.notna(original_peak_close):
+                         prior_peak_body_high = max(original_peak_open, original_peak_close)
+                         self.log(f"   Peak Info for TP1: Orig Peak Date={prior_peak_date}, Orig Idx={peak_data.get('bar_idx')}, Orig O={original_peak_open:.2f}, Orig C={original_peak_close:.2f} => BodyH={prior_peak_body_high:.2f}", data_feed=data_feed, doprint=True)
+                    else:
+                         self.log(f"   Peak Info for TP1: Original O/C missing. Peak Price={prior_peak_price}", data_feed=data_feed, doprint=True)
+
+                    pos_info['prior_peak_body_high_for_tp1'] = prior_peak_body_high
+
+                    current_total_shares = self.getposition(data_feed).size
+                    if 'initial_shares' in pos_info and pos_info['initial_shares']>0: #Add
+                        old_avg=pos_info['entry_price']; old_shares=pos_info['shares_held_before_add']
+                        pos_info['entry_price']=(old_avg*old_shares+entry_price*executed_size)/current_total_shares if current_total_shares>0 else entry_price
+                    else: #New
+                        pos_info['entry_price']=entry_price; pos_info['initial_shares']=executed_size
+                    pos_info.update({
+                        'shares_held': current_total_shares, 'shares_held_before_add': current_total_shares,
+                        'prior_peak_price_for_tp1': prior_peak_price,
+                        # 'prior_peak_body_high_for_tp1': prior_peak_body_high, # Assigned above
+                        'tp1': np.nan, 'tp2': prior_peak_price if pd.notna(prior_peak_price) else np.nan, 'tp3': np.nan,
+                        'entry_bar_idx': entry_bar_idx, 'entry_date': data_feed.datetime.date(0),
+                        'take_profit_targets_hit': [False,False,False], 'shares_sold_tp1':0, 'shares_sold_tp2':0,
+                        'post_entry_bottom_fractal': None, 'post_entry_bottom_fractal_found': False })
+                    self.highest_highs_since_entry[stock_name]=data_feed.high[0] if pd.notna(data_feed.high[0]) else entry_price
+                    atr=self.atrs[stock_name][-1] if TALIB_AVAILABLE and len(self.atrs[stock_name])>0 and pd.notna(self.atrs[stock_name][-1]) else np.nan
+                    if pd.notna(atr) and pd.notna(pos_info['entry_price']):
+                        self.atr_stop_loss_prices[stock_name]=pos_info['entry_price']-self.params.atr_multiplier*atr
+                        pos_info['atr_stop_loss_price']=self.atr_stop_loss_prices[stock_name]
+                        self.log(f'   Initial ATR SL: {self.atr_stop_loss_prices[stock_name]:.2f}', data_feed=data_feed)
+                    if stock_name in self._pending_buy_info: del self._pending_buy_info[stock_name]
+                else: self.log(f'ERROR: BUY EXECUTED for {stock_name} but no pending peak info!', data_feed=data_feed)
             elif order.issell():
-                sold_size = abs(order.executed.size);
-                self.log(
-                    f'SELL EXECUTED, Price: {order.executed.price:.2f}, Size: {sold_size}, Value: {order.executed.value:.2f}, Comm: {order.executed.comm:.2f}')
-                if self.position_info: self.position_info['shares_held'] = self.position.size
-                if hasattr(order, '_sell_reason'):
-                    if order._sell_reason == "take_profit_1":
-                        self.shares_sold_tp1 = sold_size
-                    elif order._sell_reason == "take_profit_2":
-                        self.shares_sold_tp2 = sold_size
+                 self.log(f'SELL EXECUTED, Price: {order.executed.price:.2f}, Size: {abs(order.executed.size)}', data_feed=data_feed)
+                 pos_info = self.positions_info.get(stock_name, {})
+                 if pos_info: pos_info['shares_held'] = self.getposition(data_feed).size
+                 if hasattr(order, '_sell_reason'):
+                     self.log(f'   Reason: {order._sell_reason}', data_feed=data_feed)
+                     if order._sell_reason.startswith("take_profit") and pos_info.get('post_entry_bottom_fractal'):
+                          bf = pos_info['post_entry_bottom_fractal']; bf_p=f"{bf['price']:.2f}"; bf_bl=f"{bf['body_low']:.2f}" if pd.notna(bf['body_low']) else "N/A"
+                          self.log(f"   TP Ref Post-Entry Bottom Fractal: L={bf_p}, BodyL={bf_bl} on {bf['date']}", data_feed=data_feed)
+                     if pos_info:
+                         sold_size=abs(order.executed.size)
+                         if order._sell_reason=="take_profit_1": pos_info['take_profit_targets_hit'][0]=True; pos_info['shares_sold_tp1']=sold_size
+                         elif order._sell_reason=="take_profit_2": pos_info['take_profit_targets_hit'][1]=True; pos_info['shares_sold_tp2']=sold_size
+                         elif order._sell_reason=="take_profit_3": pos_info['take_profit_targets_hit'][2]=True
         elif order.status in [order.Canceled, order.Margin, order.Rejected, order.Expired]:
-            self.log(f'Order Failed/Canceled/Margin/Rejected/Expired - Status: {order.getstatusname()}')
-            if order.isbuy() and hasattr(self, '_pending_buy_info'): del self._pending_buy_info
+            self.log(f'Order Failed for {stock_name}', data_feed=data_feed)
+            if order.isbuy() and hasattr(self, '_pending_buy_info') and stock_name in self._pending_buy_info: del self._pending_buy_info[stock_name]
         self.order = None
 
     def notify_trade(self, trade):
-        # ... (交易关闭通知处理逻辑不变) ...
+        # (Keep as previous version)
+        stock_name = trade.data._name
         if not trade.isclosed: return
-        self.log(f'TRADE CLOSED, PROFIT, GROSS {trade.pnl:.2f}, NET {trade.pnlcomm:.2f}')
-        self.position_info = {};
-        self.atr_stop_loss_price = None;
-        self.highest_high_since_entry = None
-        self.take_profit_targets_hit = [False, False, False];
-        self.shares_sold_tp1 = 0;
-        self.shares_sold_tp2 = 0
-
-    def _is_rolling_peak(self, data_line, period, index):
-        # ... (滚动顶点判断逻辑不变) ...
-        if index < period // 2 or index >= len(data_line) - period // 2: return False
-        val_at_index = data_line[index]
-        for i in range(1, period // 2 + 1):
-            if data_line[index - i] > val_at_index or data_line[index + i] > val_at_index: return False
-        return True
-
-    def _is_rolling_low(self, data_line, period, index):
-        # ... (滚动低点判断逻辑不变) ...
-        if index < period // 2 or index >= len(data_line) - period // 2: return False
-        val_at_index = data_line[index]
-        for i in range(1, period // 2 + 1):
-            if data_line[index - i] < val_at_index or data_line[index + i] < val_at_index: return False
-        return True
-
-    def _find_signal_peak_and_low(self):
-        # ... (查找前期顶点和近期低点逻辑不变，使用Backtrader数据访问方式) ...
-        current_idx = len(self) - 1;
-        peak_info = {"prior_peak": None, "recent_low": None}
-        required_lookback = max(self.params.peak_window * 2, self.params.ma_long_for_peak + 10)
-        if current_idx < required_lookback: return peak_info
-        # Find Peak
-        peak_found_idx = -1
-        for i in range(current_idx - 1, current_idx - required_lookback, -1):  # i 是过去某根K线的绝对索引
-            if self._is_rolling_peak(self.datahigh.array, self.params.peak_window, i):
-                offset = i - current_idx  # 计算相对于当前K线的偏移量 (负数)
-                potential_peak_price = self.datahigh[offset];  # 使用偏移量访问
-                ma_peak_val = self.ma_long_for_peak[offset]  # 使用偏移量访问
-                if not np.isnan(
-                        ma_peak_val) and ma_peak_val > 0 and potential_peak_price >= ma_peak_val * self.params.ma_peak_threshold:
-                    peak_info["prior_peak"] = potential_peak_price;
-                    peak_found_idx = i;
-                    break
-        if peak_info["prior_peak"] is None: return peak_info
-        # Find Low
-        low_found_idx = -1
-        # peak_found_idx 是前期高点的绝对索引
-        # 我们从当前K线的前一根 (current_idx - 1) 回溯到 peak_found_idx 之后的那一根
-        for i in range(current_idx - 1, peak_found_idx, -1):  # i 是过去某根K线的绝对索引
-            if self._is_rolling_low(self.datalow.array, self.params.peak_window, i):
-                offset = i - current_idx  # 计算相对于当前K线的偏移量 (负数)
-                peak_info["recent_low"] = self.datalow[offset];  # 使用偏移量访问
-                low_found_idx = i;
-                break
-
-        # (后续 .get() 和 self.datalow[-1] 的逻辑通常是正确的，因为它们使用了正确的相对偏移)
-        if peak_info["recent_low"] is None and peak_found_idx < current_idx - 1:
-            # The number of bars from (peak_found_idx + 1) to (current_idx - 1) inclusive
-            # If current_idx - 1 == peak_found_idx, size should be 0.
-            # The range starts 1 bar ago (index current_idx - 1)
-            # The number of elements is (current_idx - 1) - (peak_found_idx + 1) + 1 = current_idx - 1 - peak_found_idx
-            size_to_get = current_idx - 1 - peak_found_idx
-            if size_to_get > 0:
-                lows_in_range = self.datalow.get(ago=1, size=size_to_get)  # ago=1 is (current_idx-1)
-                if lows_in_range: peak_info["recent_low"] = min(lows_in_range)
-
-        if peak_info["recent_low"] is None and current_idx >= 1: peak_info["recent_low"] = self.datalow[
-            -1]  # 正确，-1是前一根K线
-        return peak_info
+        self.log(f'TRADE CLOSED for {stock_name}, PNL NET {trade.pnlcomm:.2f}', data_feed=trade.data)
+        self.positions_info[stock_name] = {}; self.atr_stop_loss_prices[stock_name] = None; self.highest_highs_since_entry[stock_name] = None
 
     def next(self):
-        # ---- PRELIMINARY DEBUG LOG (保持不变, 用于确认 next 调用) ----
-        _current_bar_stock_name = self.data._name
-        _current_bar_date_str = self.datetime.date(0).isoformat()
+        # (Keep as previous version, including logging)
+        if not hasattr(self, '_pending_buy_info'): self._pending_buy_info = {}
 
+        for i, d in enumerate(self.datas):
+            stock_name = d._name; current_idx = len(d) - 1
+            min_bars_required = self.params.fractal_lookback + 5
+            if current_idx + 1 < min_bars_required: continue
 
-        current_date_str = _current_bar_date_str
-        stock_name = _current_bar_stock_name
+            self._synthesize_higher_tf_data(d)
+            current_date=d.datetime.date(0)
+            do_specific_log = (stock_name == '603920' and current_date.isoformat() >= '2024-10-15')
+            if do_specific_log: self.log(f"--- Debug {stock_name} on {current_date} ---", data_feed=d, doprint=True)
+            if self.order and self.order.alive(): continue
 
-        # --- SPECIFIC DEBUG LOG SETUP (保持不变) ---
-        target_stock_debug = '603920'      # 您想要调试的股票代码
-        target_date_debug = '2019-07-17'  # 您想要调试的日期
-        do_specific_log = (stock_name == target_stock_debug and current_date_str == target_date_debug)
+            current_position = self.getposition(d)
+            pos_info = self.positions_info[stock_name]
 
-        if do_specific_log:
-            self.log(f"--- Debugging {stock_name} on {current_date_str} ---", doprint=True)
-        # --- END SPECIFIC DEBUG LOG SETUP ---
+            if current_position: # --- Position Management ---
+                if not pos_info or 'entry_price' not in pos_info: continue
+                if not pos_info.get('post_entry_bottom_fractal_found', False):
+                    entry_bar_idx = pos_info.get('entry_bar_idx')
+                    if entry_bar_idx is not None and current_idx >= entry_bar_idx + 2:
+                        bf_info = self._find_first_bottom_fractal_after_entry(d, entry_bar_idx, current_idx)
+                        if bf_info:
+                            self.positions_info[stock_name]['post_entry_bottom_fractal'] = bf_info
+                            self.positions_info[stock_name]['post_entry_bottom_fractal_found'] = True
+                            peak_body_h = pos_info.get('prior_peak_body_high_for_tp1')
+                            bottom_body_l = bf_info.get('body_low')
+                            peak_body_h_str = f"{peak_body_h:.2f}" if pd.notna(peak_body_h) else "NaN"; bottom_body_l_str = f"{bottom_body_l:.2f}" if pd.notna(bottom_body_l) else "NaN"
+                            self.log(f"   Calculating TP1: PeakBodyH={peak_body_h_str}, BottomBodyL={bottom_body_l_str}", data_feed=d, doprint=True)
+                            if pd.notna(peak_body_h) and pd.notna(bottom_body_l):
+                                tp1_calculated = (peak_body_h + bottom_body_l) / 2
+                                self.positions_info[stock_name]['tp1'] = tp1_calculated
+                                self.log(f"   TP1 calculated and stored: {tp1_calculated:.2f}", data_feed=d, doprint=True)
+                            else: self.log(f"   TP1 calculation failed: Inputs invalid.", data_feed=d, doprint=True)
 
-        if self.order:
-            # 订单处理中，保留原来的日志逻辑
-            if do_specific_log: self.log("Order pending, skipping next.", doprint=True)
-            return
+                # Stop Loss & Take Profit Logic (paste detailed logic from previous versions here)
+                sell_reason=None; current_close=d.close[0]; current_low=d.low[0]; current_high=d.high[0]
+                ma30=self.ma_longs[stock_name][0]; ma5=self.ma_shorts[stock_name][0]
+                current_sl = self.atr_stop_loss_prices.get(stock_name)
+                if pd.notna(ma30) and pd.notna(current_close) and current_close < ma30*(1-self.params.sell_ma30_pct): sell_reason="stop_loss_ma30_hard"
+                if not sell_reason: # ATR Stop
+                    highest_h = self.highest_highs_since_entry[stock_name]
+                    if pd.notna(current_high): highest_h = max(highest_h, current_high) if highest_h is not None else current_high; self.highest_highs_since_entry[stock_name]=highest_h
+                    atr_val = self.atrs[stock_name][0] if TALIB_AVAILABLE and len(self.atrs[stock_name])>0 and pd.notna(self.atrs[stock_name][0]) else np.nan
+                    if pd.notna(atr_val) and highest_h is not None:
+                        new_sl = highest_h - self.params.atr_multiplier * atr_val
+                        bf = pos_info.get('post_entry_bottom_fractal')
+                        if bf and pd.notna(bf['price']): new_sl = max(new_sl, bf['price'] - atr_val*0.1)
+                        if current_sl is None or new_sl > current_sl: self.atr_stop_loss_prices[stock_name]=new_sl; pos_info['atr_stop_loss_price']=new_sl; current_sl=new_sl
+                    if current_sl is not None and pd.notna(current_low) and current_low < current_sl: sell_reason="stop_loss_atr"
+                if not sell_reason: # Dead Cross
+                    ma5l=self.ma_shorts[stock_name]; ma30l=self.ma_longs[stock_name]
+                    if pd.notna(ma5)and pd.notna(ma30)and len(ma5l)>1 and len(ma30l)>1 and pd.notna(ma5l[-1])and pd.notna(ma30l[-1]) and ma5l[-1]>=ma30l[-1] and ma5<ma30: sell_reason="stop_loss_ma_dead_cross"
+                if sell_reason: self.log(f'SELL ORDER (SL {sell_reason}) {stock_name}', data_feed=d); self.order=self.close(data=d); self.order._sell_reason=sell_reason; continue
 
-        # Sell Logic (保持不变)
-        if self.position:
-            # !!! 将您原来的卖出逻辑完整地复制到这里 !!!
-            # (为了简洁，这里省略了卖出逻辑代码，请确保您策略文件中的卖出逻辑部分被保留)
-            pos_manage_info = self.position_info; sell_reason = None
-            if not pos_manage_info: return # Error check
-            current_close = self.dataclose[0]; current_high = self.datahigh[0]; current_low = self.datalow[0]
-            current_volume = self.datavolume[0]; prev_volume = self.datavolume[-1] if len(self.datavolume) > 1 else 0
-            ma30_val = self.ma_long[0]; ma5_val = self.ma_short[0]
-            # Update highest high
-            pos_manage_info['highest_price_since_entry'] = max(pos_manage_info.get('highest_price_since_entry', current_high), current_high)
-            self.highest_high_since_entry = pos_manage_info['highest_price_since_entry']
-            # Update ATR Stop
-            current_atr_val = self.atr[0] if not np.isnan(self.atr[0]) else (self.atr.atr[0] if hasattr(self.atr, 'atr') and not np.isnan(self.atr.atr[0]) else np.nan)
-            if not np.isnan(current_atr_val) and self.highest_high_since_entry is not None:
-                new_atr_sl = self.highest_high_since_entry - self.params.atr_multiplier * current_atr_val
-                if self.atr_stop_loss_price is None or new_atr_sl > self.atr_stop_loss_price:
-                    self.atr_stop_loss_price = new_atr_sl; pos_manage_info['atr_stop_loss_price'] = self.atr_stop_loss_price
-                    # if do_specific_log: self.log(f"ATR Stop Loss updated to: {self.atr_stop_loss_price:.2f}", doprint=True) # 可选的更新日志
-            # Check Stop Losses
-            if self.atr_stop_loss_price is not None and current_low < self.atr_stop_loss_price: sell_reason = "stop_loss_atr"; self.log(f'SELL Trigger (ATR): Low {current_low:.2f} < ATR Stop {self.atr_stop_loss_price:.2f}')
-            if not sell_reason and not np.isnan(ma30_val):
-                sl_ma30 = ma30_val * (1 - self.params.sell_ma30_pct)
-                if current_close < sl_ma30 and prev_volume > 1e-6 and current_volume >= prev_volume * self.params.sell_volume_ratio: sell_reason = "stop_loss_ma30_volume"; self.log(f'SELL Trigger (MA30 Vol): Close {current_close:.2f} < SL {sl_ma30:.2f}, Vol Ratio {current_volume / prev_volume:.2f}')
-            if not sell_reason and not np.isnan(ma5_val) and not np.isnan(ma30_val) and len(self.ma_short) > 1 and len(self.ma_long) > 1 and not np.isnan(self.ma_short[-1]) and not np.isnan(self.ma_long[-1]):
-                if self.ma_short[-1] >= self.ma_long[-1] and ma5_val < ma30_val: sell_reason = "stop_loss_ma_dead_cross"; self.log(f'SELL Trigger (Dead Cross): MA5 {ma5_val:.2f} < MA30 {ma30_val:.2f}')
-            # Check Take Profits (only if no stop loss yet)
-            if not sell_reason:
-                tp1, tp2, tp3 = pos_manage_info.get('tp1'), pos_manage_info.get('tp2'), pos_manage_info.get('tp3')
-                hit = self.take_profit_targets_hit; initial_shares = pos_manage_info.get('initial_shares', 0)
-                current_position_size = self.position.size; shares_per_tp_tranche = math.floor(initial_shares / 3) if initial_shares > 0 else 0
-                if shares_per_tp_tranche == 0 and initial_shares > 0: shares_per_tp_tranche = initial_shares # Sell all if cannot divide by 3
-                # TP1
-                if not hit[0] and tp1 is not None and current_high >= tp1:
-                    shares_to_sell = min(shares_per_tp_tranche, current_position_size);
-                    if shares_to_sell > 0: self.log(f'SELL Trigger (TP1): High {current_high:.2f} >= TP1 {tp1:.2f}. Selling {shares_to_sell} shares.'); self.order = self.sell(size=shares_to_sell); self.order._sell_reason = "take_profit_1"; hit[0] = True
-                # TP2
-                elif not hit[1] and tp2 is not None and current_high >= tp2 and current_position_size > 0:
-                    remaining_after_tp1_sold = current_position_size # Use current size as remaining
-                    shares_to_sell = min(shares_per_tp_tranche, remaining_after_tp1_sold)
-                    if shares_to_sell > 0: self.log(f'SELL Trigger (TP2): High {current_high:.2f} >= TP2 {tp2:.2f}. Selling {shares_to_sell} shares.'); self.order = self.sell(size=shares_to_sell); self.order._sell_reason = "take_profit_2"; hit[1] = True
-                # TP3
-                elif not hit[2] and tp3 is not None and current_high >= tp3 and current_position_size > 0:
-                    shares_to_sell = current_position_size # Sell all remaining
-                    if shares_to_sell > 0: self.log(f'SELL Trigger (TP3): High {current_high:.2f} >= TP3 {tp3:.2f}. Selling remaining {shares_to_sell} shares.'); self.order = self.sell(size=shares_to_sell); self.order._sell_reason = "take_profit_3"; hit[2] = True
-            # Execute Stop Loss if triggered AND no TP order placed this bar
-            if sell_reason and sell_reason.startswith("stop_loss") and self.position.size > 0 and not self.order:
-                self.log(f'SELL Trigger (Stop Loss FINAL): Reason {sell_reason}. Closing all {self.position.size} shares.'); self.order = self.close()
-            # MACD Warning (Keep unchanged)
-            if TALIB_AVAILABLE and self.macd_hist and len(self.macd_hist) > 20:
-                 highs_20 = self.datahigh.get(ago=0, size=20); macd_hist_20 = self.macd_hist.get(ago=0, size=20)
-                 if highs_20 and macd_hist_20 and len(highs_20) == 20 and len(macd_hist_20) == 20:
-                     if self.datahigh[0] == max(highs_20):
-                         if len(macd_hist_20[:-1]) > 0 :
-                             prev_macd_hist_peak = max(h for h in macd_hist_20[:-1] if h is not None and not np.isnan(h)) if any(h is not None and not np.isnan(h) for h in macd_hist_20[:-1]) else -np.inf
-                             current_macd_hist = self.macd_hist[0]
-                             if pd.notna(current_macd_hist) and pd.notna(prev_macd_hist_peak) and current_macd_hist < prev_macd_hist_peak * 0.8 :
-                                 self.log(f'WARN: Potential MACD Top Divergence on {current_date_str}')
-            # End of Sell Logic Block
-            pass # Placeholder to indicate end of if self.position block if needed
+                if not sell_reason and current_position.size > 0: # Take Profit
+                    tp1=pos_info.get('tp1'); tp2=pos_info.get('tp2'); tp3=pos_info.get('tp3')
+                    hit_flags=pos_info.get('take_profit_targets_hit',[False,False,False])
+                    initial_shares=pos_info.get('initial_shares',0); current_size=current_position.size
+                    if pd.notna(current_high):
+                        tp1_str = f"{tp1:.2f}" if pd.notna(tp1) else "NaN"; tp1_check_met = pd.notna(tp1) and current_high >= tp1
+                        if do_specific_log: self.log(f"TP1 Check: High={current_high:.2f}, Target={tp1_str}, Hit? {tp1_check_met}", data_feed=d, doprint=True)
+                        if not hit_flags[0] and tp1_check_met:
+                            size_sell=min(math.floor((initial_shares/3.0)/100.0)*100,current_size) if initial_shares>0 else 0
+                            if size_sell>0: self.log(f'SELL ORDER (TP1) {stock_name} at {tp1:.2f}',data_feed=d); self.order=self.sell(data=d,size=size_sell); self.order._sell_reason="take_profit_1"; continue
+                        elif not hit_flags[1] and pd.notna(tp2) and current_high >= tp2:
+                            size_sell=min(math.floor((current_size/2.0)/100.0)*100,current_size)
+                            if size_sell>0: self.log(f'SELL ORDER (TP2) {stock_name} at {tp2:.2f}',data_feed=d); self.order=self.sell(data=d,size=size_sell); self.order._sell_reason="take_profit_2"; continue
+                        elif not hit_flags[2] and pd.notna(tp3) and current_high >= tp3:
+                            if current_size>0: self.log(f'SELL ORDER (TP3) {stock_name} at {tp3:.2f}',data_feed=d); self.order=self.close(data=d); self.order._sell_reason="take_profit_3"; continue
+                pass # MACD Placeholder
 
-        # Buy Logic
-        else:  # No position
-            if do_specific_log:
-                # 这些日志保持不变
-                self.log(f"Entering BUY logic block.", doprint=True)
-                log_len_ma_long = len(self.ma_long) if hasattr(self.ma_long, '__len__') else 'N/A'
-                log_len_ma_short = len(self.ma_short) if hasattr(self.ma_short, '__len__') else 'N/A'
-                log_len_ma_long_peak = len(self.ma_long_for_peak) if hasattr(self.ma_long_for_peak, '__len__') else 'N/A'
-                self.log(f"Len ma_long: {log_len_ma_long}", doprint=True)
-                self.log(f"Len ma_short: {log_len_ma_short}", doprint=True)
-                self.log(f"Len ma_long_for_peak: {log_len_ma_long_peak}", doprint=True)
+            else: # --- Entry Logic ---
+                weekly_ma=self.weekly_mas.get(stock_name); last_completed_ma=self.last_completed_weekly_ma.get(stock_name)
+                weekly_ok = (pd.notna(weekly_ma) and (pd.notna(last_completed_ma) and round(weekly_ma,2)>=round(last_completed_ma,2))) or (pd.notna(weekly_ma) and last_completed_ma is None)
+                if not weekly_ok:
+                    if do_specific_log: self.log("Entry Fail: Weekly Trend", data_feed=d, doprint=True); continue
+                ma30=self.ma_longs[stock_name][0]; ma5=self.ma_shorts[stock_name][0]
+                if pd.isna(ma30) or pd.isna(ma5):
+                    if do_specific_log: self.log("Entry Fail: Daily MA NaN", data_feed=d, doprint=True); continue
 
-            # Early exit if indicators don't have minimal data (保持不变)
-            if np.isnan(self.ma_long[0]) or np.isnan(self.ma_long[-1]) or np.isnan(self.ma_short[0]):
-                 if do_specific_log: self.log(f"Condition Fail: Essential MA values not ready (NaN). MA30[0]={self.ma_long[0]}, MA30[-1]={self.ma_long[-1]}, MA5[0]={self.ma_short[0]}", doprint=True)
-                 return
-            # You might need a specific check for ma_long_for_peak as well if _find_signal_peak_and_low requires it early
+                prior_peak_info = self._find_prior_peak_stroke_info(d)
+                if prior_peak_info.get("price") is None:
+                    if do_specific_log: self.log(f"Entry Fail: No valid prior peak stroke", data_feed=d, doprint=True);
+                    continue
 
-            peak_low_data = self._find_signal_peak_and_low() # 保持不变
-            prior_peak, recent_low = peak_low_data["prior_peak"], peak_low_data["recent_low"]
+                buy_signal_type = None; current_low=d.low[0]; current_close=d.close[0]
+                if any(pd.isna(v) for v in [current_low, current_close]): continue
+                cond_daily_pullback = (current_low < ma30 * 1.05 and current_low > ma30 * 0.97)
+                cond_close_above_weekly_ma30 = pd.notna(weekly_ma) and current_close > weekly_ma
+                cond_mas_bullish = ma5 > ma30
 
-            if do_specific_log: # 保持不变
-                self.log(f"Peak/Low Data: prior_peak={prior_peak}, recent_low={recent_low}", doprint=True)
-
-            if prior_peak is None or recent_low is None: # 保持不变
-                if do_specific_log: self.log(f"Condition Fail: prior_peak or recent_low is None.", doprint=True)
-                return
-            if prior_peak <= recent_low : # 保持不变
-                if do_specific_log: self.log(f"Condition Fail: prior_peak ({prior_peak}) <= recent_low ({recent_low}). Invalid signal.", doprint=True)
-                return
-
-            # ----- !!! MODIFIED Trend Check Logic START !!! -----
-            is_trend_ok = False # Default state
-            ma_curr_raw = self.ma_long[0]
-            ma_prev_raw = self.ma_long[-1]
-
-            # Check for NaN should have been caught above, but double check is fine
-            if not np.isnan(ma_curr_raw) and not np.isnan(ma_prev_raw):
-                ma_curr_rounded = round(ma_curr_raw, 2)
-                ma_prev_rounded = round(ma_prev_raw, 2)
-
-                is_trend_ok = ma_curr_rounded >= ma_prev_rounded # The new comparison logic
-
-                if do_specific_log: # Keep the specific log for the NEW check
-                    self.log(f"Trend check (MA30 Round Compare): MA30[0]={ma_curr_rounded:.2f}, MA30[-1]={ma_prev_rounded:.2f}, is_trend_ok={is_trend_ok}", doprint=True)
-            else:
-                 if do_specific_log:
-                     self.log(f"Trend check (MA30 Round Compare): Failed due to NaN value. MA30[0]={ma_curr_raw}, MA30[-1]={ma_prev_raw}", doprint=True)
-
-            # Check if trend condition failed (保持不变)
-            if not is_trend_ok:
                 if do_specific_log:
-                     self.log(f"Condition Fail: Trend is not OK (is_trend_ok={is_trend_ok}).", doprint=True)
-                return # Exit if trend condition not met
-            # ----- !!! MODIFIED Trend Check Logic END !!! -----
+                    wma_str = f"{weekly_ma:.4f}" if pd.notna(weekly_ma) else "NaN"
+                    self.log(f"Daily Trigger Check: L={current_low:.4f}, C={current_close:.4f}, MA5={ma5:.4f}, DailyMA30={ma30:.4f}, WeeklyMA30={wma_str}", data_feed=d, doprint=True)
+                    self.log(f"  Pullback? {cond_daily_pullback}", data_feed=d, doprint=True)
+                    self.log(f"  C > WeeklyMA? {cond_close_above_weekly_ma30}", data_feed=d, doprint=True)
+                    self.log(f"  MA5 > DailyMA30? {cond_mas_bullish}", data_feed=d, doprint=True)
 
-            # --- Subsequent Buy Conditions (保持不变) ---
-            current_close = self.dataclose[0]
-            val_ma_short = self.ma_short[0]
-            val_ma_long = self.ma_long[0] # Use this for consistency below
+                if cond_daily_pullback and cond_close_above_weekly_ma30 and cond_mas_bullish and ma30 > 1e-6:
+                    buy_signal_type = "Daily Pullback & Close > Weekly MA30"
+                    if do_specific_log: self.log(f"BUY SIGNAL MET: {buy_signal_type}", data_feed=d, doprint=True)
 
-            if do_specific_log:
-                self.log(f"Subsequent Checks: Close: {current_close:.2f}, MA_Short: {val_ma_short:.2f}, MA_Long: {val_ma_long:.2f}", doprint=True)
-
-            if current_close <= val_ma_long:
-                if do_specific_log: self.log(f"Condition Fail: Close ({current_close:.2f}) <= MA_Long ({val_ma_long:.2f}).", doprint=True)
-                return
-
-            if val_ma_short <= val_ma_long:
-                if do_specific_log: self.log(f"Condition Fail: MA_Short ({val_ma_short:.2f}) <= MA_Long ({val_ma_long:.2f}).", doprint=True)
-                return
-
-            if val_ma_long <= 1e-6:
-                if do_specific_log: self.log(f"Condition Fail: MA_Long ({val_ma_long:.2f}) is too small.", doprint=True)
-                return
-
-            pullback_value = (current_close - val_ma_long) / val_ma_long
-            is_pullback = (current_close >= val_ma_long) and (pullback_value <= self.params.pullback_pct)
-
-            if do_specific_log:
-                self.log(f"Pullback check: current_close ({current_close:.2f}) >= MA_Long ({val_ma_long:.2f}) is {current_close >= val_ma_long}", doprint=True)
-                self.log(f"Pullback value ( (C-MA)/MA ): {pullback_value:.4f}, pullback_pct_param: {self.params.pullback_pct:.4f}", doprint=True)
-                self.log(f"Is_pullback: {is_pullback}", doprint=True)
-
-            if not is_pullback:
-                if do_specific_log: self.log(f"Condition Fail: Not a pullback (is_pullback={is_pullback}).", doprint=True)
-                return
-
-            # --- Buy conditions met (保持不变) ---
-            # Log BUY SIGNAL first
-            self.log(f'BUY SIGNAL on {current_date_str} for {stock_name}') # 这是您要保留的日志
-            # Store peak/low info for use in notify_order
-            self._pending_buy_info = {"prior_peak": prior_peak, "recent_low": recent_low}
-
-            # Calculate size (保持不变)
-            cash = self.broker.get_cash()
-            value = self.broker.get_value()
-            target_position_value = value * self.params.max_position_ratio
-            size = 0
-            if current_close > 0:
-                 size_based_on_target_value = math.floor((target_position_value / current_close) / 100.0) * 100
-                 size_based_on_cash = math.floor((cash / current_close) / 100.0) * 100
-                 size = min(size_based_on_target_value, size_based_on_cash)
-
-            # Create Buy Order (保持不变)
-            if size > 0:
-                self.log(f'BUY CREATE, Size: {size}, Price ~ {current_close:.2f}')
-                self.order = self.buy(size=size)
-            else:
-                self.log(f'Buy signal, but calculated size is 0. Cash={cash:.2f}, TargetPosVal={target_position_value:.2f}, Close={current_close:.2f}')
-                if hasattr(self, '_pending_buy_info'):
-                    del self._pending_buy_info # Clean up if no order placed
+                if buy_signal_type: # Execute Buy
+                    current_close_price = d.close[0]
+                    if pd.isna(current_close_price) or current_close_price <= 0: continue
+                    self._pending_buy_info[stock_name] = prior_peak_info
+                    cash=self.broker.get_cash(); value=self.broker.getvalue()
+                    target_value=value*self.params.max_position_ratio; value_to_invest=target_value; size=0
+                    if value_to_invest>0 and current_close_price > 0:
+                        shares_val=math.floor((value_to_invest/current_close_price)/100.0)*100
+                        shares_cash=math.floor((cash/current_close_price)/100.0)*100 if cash>0 else 0
+                        size=min(shares_val, shares_cash)
+                    if size > 0:
+                        # Use the original peak date in the log message
+                        self.log(f'BUY ORDER ({buy_signal_type}) based on Peak {prior_peak_info.get("date")}. Size:{size}', data_feed=d)
+                        self.order = self.buy(data=d, size=size)
+                        return
+                    else:
+                        self.log(f'Buy signal {buy_signal_type}, but size=0.', data_feed=d)
+                        if stock_name in self._pending_buy_info: del self._pending_buy_info[stock_name]
+                elif do_specific_log:
+                    self.log(f"No buy trigger conditions met for {stock_name}", data_feed=d, doprint=True)
+    pass # End of Class
