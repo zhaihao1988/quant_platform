@@ -151,17 +151,15 @@ class MAPullbackPeakCondBtStrategy(bt.Strategy):
                 elif current_fractal.type=='bottom' and current_fractal.kline.l<=potential_start_fractal.kline.l: potential_start_fractal=current_fractal
         return strokes
 
-    # --- MODIFIED: _find_prior_peak_stroke_info to return ORIGINAL peak date ---
     def _find_prior_peak_stroke_info(self, data_feed):
-        """ Finds the latest upward stroke end (peak) meeting MA condition.
-            Returns info including original O/C/Date of the bar with the highest price. """
+        # (Keep previous version with corrected date and detailed logging)
         current_idx = len(data_feed) - 1; data_name = data_feed._name
-        peak_info = {"price": None, "bar_idx": None, "date": None, # This will be the ORIGINAL date
-                     "merged_kline": None, # Keep merged kline info if needed elsewhere
+        peak_info = {"price": None, "bar_idx": None, "date": None, "merged_kline": None,
                      "original_peak_open": None, "original_peak_close": None}
         lookback = self.params.fractal_lookback
         if current_idx < lookback + 2: return peak_info
         raw_bars = [];
+        do_specific_log_local = (data_name == '603920' and data_feed.datetime.date(0).isoformat() >= '2024-10-15')
         try:
             dates=data_feed.datetime.get(ago=-1,size=lookback+1); opens=data_feed.open.get(ago=-1,size=lookback+1); highs=data_feed.high.get(ago=-1,size=lookback+1); lows=data_feed.low.get(ago=-1,size=lookback+1); closes=data_feed.close.get(ago=-1,size=lookback+1)
             for i in range(len(dates)):
@@ -174,36 +172,37 @@ class MAPullbackPeakCondBtStrategy(bt.Strategy):
         top_fractals, bottom_fractals = self._identify_all_merged_fractals(merged_klines)
         strokes = self._identify_strokes(merged_klines, top_fractals, bottom_fractals)
         if not strokes: return peak_info
+        if do_specific_log_local: self.log(f"Found {len(strokes)} strokes. Searching for peak...", data_feed=data_feed, doprint=True)
         ma_line = self.ma_longs_for_peak[data_name].line
         for stroke in reversed(strokes):
             if stroke.direction == 1:
-                peak_fractal = stroke.end_fractal;
-                original_high_idx = peak_fractal.kline.high_idx # Get index of original high bar
-                ago = current_idx - original_high_idx
-                if ago >= 0 and ago < len(ma_line):
+                peak_fractal = stroke.end_fractal; merged_k_peak = peak_fractal.kline
+                if do_specific_log_local: self.log(f"Checking Peak Candidate Stroke End: MergedDate={merged_k_peak.dt}, MergedH={merged_k_peak.h:.2f}, MergedIdx={merged_k_peak.idx}, **HighOrigIdx={merged_k_peak.high_idx}**", data_feed=data_feed, doprint=True)
+                original_high_idx = merged_k_peak.high_idx; ago = current_idx - original_high_idx
+                if do_specific_log_local: self.log(f"  Derived HighOrigIdx={original_high_idx}, ago={ago}", data_feed=data_feed, doprint=True)
+                if ago >= 0 and ago < len(ma_line) and ago < len(data_feed.open):
                      ma_val = ma_line[-ago]
-                     if pd.notna(ma_val) and ma_val > 0 and peak_fractal.kline.h >= ma_val * self.params.ma_peak_threshold:
-                         # Fetch original O/C and Date using 'ago' derived from original_high_idx
-                         original_open = data_feed.open[-ago]
-                         original_close = data_feed.close[-ago]
-                         original_date = data_feed.datetime.date(-ago) # Fetch original date
-
-                         peak_info["price"] = peak_fractal.kline.h;
-                         peak_info["bar_idx"] = original_high_idx;
-                         peak_info["date"] = original_date # *** Use original date ***
-                         peak_info["merged_kline"] = peak_fractal.kline
-                         peak_info["original_peak_open"] = original_open
-                         peak_info["original_peak_close"] = original_close
-                         self.log(f"Found valid prior peak stroke: Peak Date={peak_info['date']}, H={peak_info['price']:.2f}", data_feed=data_feed, doprint=True) # Log using original date
+                     ma_check_ok = pd.notna(ma_val) and ma_val > 0 and merged_k_peak.h >= ma_val * self.params.ma_peak_threshold
+                     if do_specific_log_local: self.log(f"  MA Check at ago={ago}: MA={ma_val:.2f}, Thr={ma_val*self.params.ma_peak_threshold:.2f}, PeakH={merged_k_peak.h:.2f}. OK? {ma_check_ok}", data_feed=data_feed, doprint=True)
+                     if ma_check_ok:
+                         original_open = data_feed.open[-ago]; original_close = data_feed.close[-ago]; original_date = data_feed.datetime.date(-ago)
+                         if do_specific_log_local: self.log(f"  Fetching Original Data using ago={ago} (Idx={original_high_idx}): **OrigDate={original_date}**, O={original_open:.2f}, C={original_close:.2f}", data_feed=data_feed, doprint=True)
+                         peak_info["price"] = merged_k_peak.h; peak_info["bar_idx"] = original_high_idx; peak_info["date"] = original_date
+                         peak_info["merged_kline"] = merged_k_peak; peak_info["original_peak_open"] = original_open; peak_info["original_peak_close"] = original_close
+                         self.log(f"Found valid prior peak stroke: Peak Date={peak_info['date']}, H={peak_info['price']:.2f}, Orig Idx={original_high_idx}", data_feed=data_feed, doprint=True)
                          return peak_info
+                elif do_specific_log_local: self.log(f"  Invalid 'ago'={ago} for accessing data/MA lines", data_feed=data_feed, doprint=True)
         self.log("No valid prior peak stroke found meeting MA criteria.", data_feed=data_feed, doprint=True)
         return peak_info
 
+    # --- MODIFIED: _find_first_bottom_fractal_after_entry returns original info ---
     def _find_first_bottom_fractal_after_entry(self, data_feed, entry_bar_idx, current_bar_idx):
-        # (Keep previous version with enhanced logging)
+        """ Finds the first confirmed bottom fractal on merged K-lines AT or AFTER entry.
+            Returns info based on the ORIGINAL K-line containing the lowest point. """
         data_name = data_feed._name
         do_specific_log_local = (data_name == '603920' and data_feed.datetime.date(0).isoformat() >= '2024-10-17')
         lookback_start = max(0, entry_bar_idx - 5)
+        # Ensure enough bars *after* entry for confirmation
         if current_bar_idx < entry_bar_idx + 2 : return None
         raw_bars = [];
         try:
@@ -218,19 +217,46 @@ class MAPullbackPeakCondBtStrategy(bt.Strategy):
         if len(merged_klines) < 3 : return None
         if do_specific_log_local:
             self.log(f"--- Finding bottom fractal after entry {entry_bar_idx} on {data_feed.datetime.date(0)} ---", data_feed=data_feed, doprint=True)
-            self.log(f"Analyzing {len(merged_klines)} merged klines:", data_feed=data_feed, doprint=True)
-            for mk in merged_klines[-10:]: self.log(f"  Merged: {mk.dt} O={mk.o:.2f} H={mk.h:.2f} L={mk.l:.2f} C={mk.c:.2f} OrigIdx={mk.idx} LowIdx={mk.low_idx}", data_feed=data_feed, doprint=True)
+            # self.log(f"Analyzing {len(merged_klines)} merged klines:", data_feed=data_feed, doprint=True) # Can be verbose
+            # for mk in merged_klines[-10:]: self.log(f"  Merged: {mk.dt} O={mk.o:.2f} H={mk.h:.2f} L={mk.l:.2f} C={mk.c:.2f} OrigIdx={mk.idx} LowIdx={mk.low_idx}", data_feed=data_feed, doprint=True)
+
         for j in range(1, len(merged_klines) - 1):
             fractal_kline = merged_klines[j]
-            if fractal_kline.idx > entry_bar_idx:
+            # Check if the merged kline's *end index* is at or after entry
+            # This ensures the fractal pattern includes data up to the entry bar or later
+            if fractal_kline.idx >= entry_bar_idx:
                 is_bottom = self._find_merged_fractal(merged_klines, j, fractal_type='bottom')
-                if do_specific_log_local: self.log(f"  Checking merged kline index {j} (Date: {fractal_kline.dt}, OrigIdx: {fractal_kline.idx}) for bottom fractal: {is_bottom}", data_feed=data_feed, doprint=True)
+                if do_specific_log_local: self.log(f"  Checking merged kline index {j} (Date: {fractal_kline.dt}, OrigIdx: {fractal_kline.idx}) vs EntryIdx {entry_bar_idx}. Is bottom? {is_bottom}", data_feed=data_feed, doprint=True)
                 if is_bottom:
-                    body_low = min(fractal_kline.o, fractal_kline.c) if pd.notna(fractal_kline.o) and pd.notna(fractal_kline.c) else np.nan
-                    fractal_info = {'date': fractal_kline.dt, 'price': fractal_kline.l, 'body_low': body_low, 'bar_idx': fractal_kline.low_idx, 'merged_kline_o': fractal_kline.o, 'merged_kline_c': fractal_kline.c}
-                    self.log(f"Found FIRST bottom fractal after entry: Date={fractal_info['date']}, L={fractal_info['price']:.2f}, BodyL={fractal_info['body_low']:.2f}, OrigBarIdx={fractal_info['bar_idx']}", data_feed=data_feed, doprint=True)
-                    return fractal_info
-        if do_specific_log_local: self.log(f"No confirmed bottom fractal found AFTER entry bar {entry_bar_idx} yet.", data_feed=data_feed, doprint=True)
+                    # Found the first confirmed bottom fractal structure
+                    # Get info from the ORIGINAL K-line with the actual lowest price
+                    original_low_idx = fractal_kline.low_idx
+                    ago_low = current_bar_idx - original_low_idx
+
+                    if ago_low >= 0 and ago_low < len(data_feed.open):
+                        original_low_date = data_feed.datetime.date(-ago_low)
+                        original_low_open = data_feed.open[-ago_low]
+                        original_low_close = data_feed.close[-ago_low]
+                        original_price_low = data_feed.low[-ago_low]
+
+                        if pd.notna(original_low_open) and pd.notna(original_low_close):
+                            original_body_low = min(original_low_open, original_low_close)
+                        else: original_body_low = np.nan
+
+                        fractal_info = {
+                            'date': original_low_date,      # Date of original low bar
+                            'price': original_price_low,     # Price low of original bar
+                            'body_low': original_body_low,   # Body low of original bar
+                            'bar_idx': original_low_idx,     # Index of original low bar
+                            # Optional: keep merged info for debugging
+                            'merged_kline_date': fractal_kline.dt,
+                            'merged_kline_l': fractal_kline.l,
+                        }
+                        self.log(f"Found FIRST bottom fractal AT/AFTER entry: **OrigDate={fractal_info['date']}**, OrigL={fractal_info['price']:.2f}, **OrigBodyL={fractal_info['body_low']:.2f}**, OrigBarIdx={fractal_info['bar_idx']}", data_feed=data_feed, doprint=True)
+                        return fractal_info
+                    elif do_specific_log_local: self.log(f"  Invalid 'ago_low'={ago_low} for original low data (Idx={original_low_idx})", data_feed=data_feed, doprint=True)
+
+        if do_specific_log_local: self.log(f"No confirmed bottom fractal found AT/AFTER entry bar {entry_bar_idx} yet.", data_feed=data_feed, doprint=True)
         return None
 
     def _synthesize_higher_tf_data(self, data_feed):
@@ -250,17 +276,13 @@ class MAPullbackPeakCondBtStrategy(bt.Strategy):
                     synth_completed_weeks = list(self.synthesized_weekly_data_agg[dname])
                     if len(synth_completed_weeks) >= self.params.weekly_ma_period:
                         closes_completed = [b['close'] for b in synth_completed_weeks[-self.params.weekly_ma_period:] if pd.notna(b['close'])]
-                        if len(closes_completed) == self.params.weekly_ma_period:
-                             self.last_completed_weekly_ma[dname] = sum(closes_completed) / self.params.weekly_ma_period
+                        if len(closes_completed) == self.params.weekly_ma_period: self.last_completed_weekly_ma[dname] = sum(closes_completed) / self.params.weekly_ma_period
                 self.current_week_open_dates[dname] = current_dt_obj; self.current_week_data_agg[dname] = {**bar_data, 'datetime_start': current_dt_obj, 'datetime_end': current_dt_obj}
-            elif current_week_data:
-                current_week_data['high']=max(current_week_data['high'], bar_data['high']); current_week_data['low']=min(current_week_data['low'], bar_data['low']); current_week_data['close']=bar_data['close']; current_week_data['volume']+=bar_data['volume']; current_week_data['datetime_end']=current_dt_obj
+            elif current_week_data: current_week_data['high']=max(current_week_data['high'], bar_data['high']); current_week_data['low']=min(current_week_data['low'], bar_data['low']); current_week_data['close']=bar_data['close']; current_week_data['volume']+=bar_data['volume']; current_week_data['datetime_end']=current_dt_obj
             synth_weekly_data_list = list(self.synthesized_weekly_data_agg[dname]); current_w_data_dict = self.current_week_data_agg.get(dname)
             if current_w_data_dict: synth_weekly_data_list.append(current_w_data_dict)
             if len(synth_weekly_data_list) >= self.params.weekly_ma_period:
-                closes_for_ma = [b['close'] for b in synth_weekly_data_list[-self.params.weekly_ma_period:] if pd.notna(b['close'])]
-                if len(closes_for_ma) == self.params.weekly_ma_period: self.weekly_mas[dname]=sum(closes_for_ma)/self.params.weekly_ma_period
-                else: self.weekly_mas[dname]=np.nan
+                closes_for_ma = [b['close'] for b in synth_weekly_data_list[-self.params.weekly_ma_period:] if pd.notna(b['close'])]; self.weekly_mas[dname]=sum(closes_for_ma)/self.params.weekly_ma_period if len(closes_for_ma)==self.params.weekly_ma_period else np.nan
             else: self.weekly_mas[dname]=np.nan
             current_month_data = self.current_month_data_agg.get(dname); current_month_open_date = self.current_month_open_dates.get(dname)
             is_new_month = (current_month_open_date is None or current_dt_obj.month != current_month_open_date.month or current_dt_obj.year != current_month_open_date.year)
@@ -271,15 +293,13 @@ class MAPullbackPeakCondBtStrategy(bt.Strategy):
             synth_monthly_data = list(self.synthesized_monthly_data_agg[dname]); current_m_data = self.current_month_data_agg.get(dname)
             if current_m_data: synth_monthly_data.append(current_m_data)
             if len(synth_monthly_data) >= self.params.monthly_ma_period:
-                closes = [b['close'] for b in synth_monthly_data[-self.params.monthly_ma_period:] if pd.notna(b['close'])]
-                if len(closes)==self.params.monthly_ma_period: self.monthly_mas[dname]=sum(closes)/self.params.monthly_ma_period
-                else: self.monthly_mas[dname]=np.nan
+                closes = [b['close'] for b in synth_monthly_data[-self.params.monthly_ma_period:] if pd.notna(b['close'])]; self.monthly_mas[dname]=sum(closes)/self.params.monthly_ma_period if len(closes)==self.params.monthly_ma_period else np.nan
             else: self.monthly_mas[dname]=np.nan
         except Exception as e: self.log(f"Error synthesizing TFs for {dname}: {e}", data_feed=data_feed)
 
-
-    # --- MODIFIED: notify_order uses original O/C for body high ---
+    # --- notify_order (Keep previous version using original peak O/C) ---
     def notify_order(self, order):
+        # (Keep as previous version)
         data_feed = order.data; stock_name = data_feed._name
         if order.status in [order.Submitted, order.Accepted]: return
         if order.status == order.Completed:
@@ -289,33 +309,22 @@ class MAPullbackPeakCondBtStrategy(bt.Strategy):
                 pos_info = self.positions_info[stock_name]
                 if hasattr(self, '_pending_buy_info') and stock_name in self._pending_buy_info:
                     peak_data = self._pending_buy_info[stock_name]
-                    prior_peak_price = peak_data.get('price')
-                    # Use the original date from peak_info now
-                    prior_peak_date = peak_data.get('date', 'N/A')
-                    original_peak_open = peak_data.get('original_peak_open')
-                    original_peak_close = peak_data.get('original_peak_close')
+                    prior_peak_price = peak_data.get('price'); prior_peak_date = peak_data.get('date', 'N/A')
+                    original_peak_open = peak_data.get('original_peak_open'); original_peak_close = peak_data.get('original_peak_close')
                     prior_peak_body_high = np.nan
                     if pd.notna(original_peak_open) and pd.notna(original_peak_close):
                          prior_peak_body_high = max(original_peak_open, original_peak_close)
                          self.log(f"   Peak Info for TP1: Orig Peak Date={prior_peak_date}, Orig Idx={peak_data.get('bar_idx')}, Orig O={original_peak_open:.2f}, Orig C={original_peak_close:.2f} => BodyH={prior_peak_body_high:.2f}", data_feed=data_feed, doprint=True)
-                    else:
-                         self.log(f"   Peak Info for TP1: Original O/C missing. Peak Price={prior_peak_price}", data_feed=data_feed, doprint=True)
-
+                    else: self.log(f"   Peak Info for TP1: Original O/C missing. Peak Price={prior_peak_price}", data_feed=data_feed, doprint=True)
                     pos_info['prior_peak_body_high_for_tp1'] = prior_peak_body_high
-
                     current_total_shares = self.getposition(data_feed).size
                     if 'initial_shares' in pos_info and pos_info['initial_shares']>0: #Add
                         old_avg=pos_info['entry_price']; old_shares=pos_info['shares_held_before_add']
                         pos_info['entry_price']=(old_avg*old_shares+entry_price*executed_size)/current_total_shares if current_total_shares>0 else entry_price
-                    else: #New
-                        pos_info['entry_price']=entry_price; pos_info['initial_shares']=executed_size
-                    pos_info.update({
-                        'shares_held': current_total_shares, 'shares_held_before_add': current_total_shares,
-                        'prior_peak_price_for_tp1': prior_peak_price,
-                        # 'prior_peak_body_high_for_tp1': prior_peak_body_high, # Assigned above
-                        'tp1': np.nan, 'tp2': prior_peak_price if pd.notna(prior_peak_price) else np.nan, 'tp3': np.nan,
-                        'entry_bar_idx': entry_bar_idx, 'entry_date': data_feed.datetime.date(0),
-                        'take_profit_targets_hit': [False,False,False], 'shares_sold_tp1':0, 'shares_sold_tp2':0,
+                    else: pos_info['entry_price']=entry_price; pos_info['initial_shares']=executed_size
+                    pos_info.update({ 'shares_held': current_total_shares, 'shares_held_before_add': current_total_shares,
+                        'prior_peak_price_for_tp1': prior_peak_price, 'tp1': np.nan, 'tp2': prior_peak_price if pd.notna(prior_peak_price) else np.nan, 'tp3': np.nan,
+                        'entry_bar_idx': entry_bar_idx, 'entry_date': data_feed.datetime.date(0), 'take_profit_targets_hit': [False,False,False], 'shares_sold_tp1':0, 'shares_sold_tp2':0,
                         'post_entry_bottom_fractal': None, 'post_entry_bottom_fractal_found': False })
                     self.highest_highs_since_entry[stock_name]=data_feed.high[0] if pd.notna(data_feed.high[0]) else entry_price
                     atr=self.atrs[stock_name][-1] if TALIB_AVAILABLE and len(self.atrs[stock_name])>0 and pd.notna(self.atrs[stock_name][-1]) else np.nan
@@ -333,7 +342,7 @@ class MAPullbackPeakCondBtStrategy(bt.Strategy):
                      self.log(f'   Reason: {order._sell_reason}', data_feed=data_feed)
                      if order._sell_reason.startswith("take_profit") and pos_info.get('post_entry_bottom_fractal'):
                           bf = pos_info['post_entry_bottom_fractal']; bf_p=f"{bf['price']:.2f}"; bf_bl=f"{bf['body_low']:.2f}" if pd.notna(bf['body_low']) else "N/A"
-                          self.log(f"   TP Ref Post-Entry Bottom Fractal: L={bf_p}, BodyL={bf_bl} on {bf['date']}", data_feed=data_feed)
+                          self.log(f"   TP Ref Post-Entry Bottom Fractal: **OrigDate={bf['date']}**, OrigL={bf['price']:.2f}, **OrigBodyL={bf_bl}**, OrigBarIdx={bf['bar_idx']}", data_feed=data_feed) # Log original info
                      if pos_info:
                          sold_size=abs(order.executed.size)
                          if order._sell_reason=="take_profit_1": pos_info['take_profit_targets_hit'][0]=True; pos_info['shares_sold_tp1']=sold_size
@@ -345,14 +354,14 @@ class MAPullbackPeakCondBtStrategy(bt.Strategy):
         self.order = None
 
     def notify_trade(self, trade):
-        # (Keep as previous version)
+        # (Keep as is)
         stock_name = trade.data._name
         if not trade.isclosed: return
         self.log(f'TRADE CLOSED for {stock_name}, PNL NET {trade.pnlcomm:.2f}', data_feed=trade.data)
         self.positions_info[stock_name] = {}; self.atr_stop_loss_prices[stock_name] = None; self.highest_highs_since_entry[stock_name] = None
 
+    # --- MODIFIED: next uses corrected bottom fractal logic ---
     def next(self):
-        # (Keep as previous version, including logging)
         if not hasattr(self, '_pending_buy_info'): self._pending_buy_info = {}
 
         for i, d in enumerate(self.datas):
@@ -371,24 +380,26 @@ class MAPullbackPeakCondBtStrategy(bt.Strategy):
 
             if current_position: # --- Position Management ---
                 if not pos_info or 'entry_price' not in pos_info: continue
+                # 1. Find first bottom fractal after entry (once) & Calculate TP1
                 if not pos_info.get('post_entry_bottom_fractal_found', False):
                     entry_bar_idx = pos_info.get('entry_bar_idx')
                     if entry_bar_idx is not None and current_idx >= entry_bar_idx + 2:
                         bf_info = self._find_first_bottom_fractal_after_entry(d, entry_bar_idx, current_idx)
-                        if bf_info:
+                        if bf_info: # bf_info now contains original bar date and body low
                             self.positions_info[stock_name]['post_entry_bottom_fractal'] = bf_info
                             self.positions_info[stock_name]['post_entry_bottom_fractal_found'] = True
                             peak_body_h = pos_info.get('prior_peak_body_high_for_tp1')
-                            bottom_body_l = bf_info.get('body_low')
+                            bottom_body_l = bf_info.get('body_low') # Use original body low
                             peak_body_h_str = f"{peak_body_h:.2f}" if pd.notna(peak_body_h) else "NaN"; bottom_body_l_str = f"{bottom_body_l:.2f}" if pd.notna(bottom_body_l) else "NaN"
-                            self.log(f"   Calculating TP1: PeakBodyH={peak_body_h_str}, BottomBodyL={bottom_body_l_str}", data_feed=d, doprint=True)
+                            self.log(f"   Calculating TP1: PeakBodyH={peak_body_h_str}, BottomBodyL={bottom_body_l_str} (from OrigDate={bf_info['date']})", data_feed=d, doprint=True)
                             if pd.notna(peak_body_h) and pd.notna(bottom_body_l):
                                 tp1_calculated = (peak_body_h + bottom_body_l) / 2
                                 self.positions_info[stock_name]['tp1'] = tp1_calculated
                                 self.log(f"   TP1 calculated and stored: {tp1_calculated:.2f}", data_feed=d, doprint=True)
                             else: self.log(f"   TP1 calculation failed: Inputs invalid.", data_feed=d, doprint=True)
 
-                # Stop Loss & Take Profit Logic (paste detailed logic from previous versions here)
+                # 2. Stop Loss & 3. Take Profit Logic
+                # ... (Keep as previous version, TP1 check uses updated value) ...
                 sell_reason=None; current_close=d.close[0]; current_low=d.low[0]; current_high=d.high[0]
                 ma30=self.ma_longs[stock_name][0]; ma5=self.ma_shorts[stock_name][0]
                 current_sl = self.atr_stop_loss_prices.get(stock_name)
@@ -399,8 +410,8 @@ class MAPullbackPeakCondBtStrategy(bt.Strategy):
                     atr_val = self.atrs[stock_name][0] if TALIB_AVAILABLE and len(self.atrs[stock_name])>0 and pd.notna(self.atrs[stock_name][0]) else np.nan
                     if pd.notna(atr_val) and highest_h is not None:
                         new_sl = highest_h - self.params.atr_multiplier * atr_val
-                        bf = pos_info.get('post_entry_bottom_fractal')
-                        if bf and pd.notna(bf['price']): new_sl = max(new_sl, bf['price'] - atr_val*0.1)
+                        bf = pos_info.get('post_entry_bottom_fractal') # Contains original price info now
+                        if bf and pd.notna(bf['price']): new_sl = max(new_sl, bf['price'] - atr_val*0.1) # Use original low price for floor
                         if current_sl is None or new_sl > current_sl: self.atr_stop_loss_prices[stock_name]=new_sl; pos_info['atr_stop_loss_price']=new_sl; current_sl=new_sl
                     if current_sl is not None and pd.notna(current_low) and current_low < current_sl: sell_reason="stop_loss_atr"
                 if not sell_reason: # Dead Cross
@@ -467,7 +478,6 @@ class MAPullbackPeakCondBtStrategy(bt.Strategy):
                         shares_cash=math.floor((cash/current_close_price)/100.0)*100 if cash>0 else 0
                         size=min(shares_val, shares_cash)
                     if size > 0:
-                        # Use the original peak date in the log message
                         self.log(f'BUY ORDER ({buy_signal_type}) based on Peak {prior_peak_info.get("date")}. Size:{size}', data_feed=d)
                         self.order = self.buy(data=d, size=size)
                         return
@@ -476,4 +486,5 @@ class MAPullbackPeakCondBtStrategy(bt.Strategy):
                         if stock_name in self._pending_buy_info: del self._pending_buy_info[stock_name]
                 elif do_specific_log:
                     self.log(f"No buy trigger conditions met for {stock_name}", data_feed=d, doprint=True)
+
     pass # End of Class
