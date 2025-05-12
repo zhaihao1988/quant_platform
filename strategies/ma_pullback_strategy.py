@@ -87,10 +87,9 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
             'ma_short': 5,
             'ma_long': 30,  # This is the MA30 used for invalidation rules
             'ma_long_for_peak_qualify_period': 30,
-            'ma_peak_threshold': 1.15,
+            'ma_peak_threshold': 1.25,
             'peak_recent_gain_days': 30,
             'peak_recent_gain_ratio': 1.20,
-            # 'downstroke_invalidate_threshold': 0.03, # Original parameter, may become less relevant or removed
             'high_invalidate_close_below_ma30_pct': 0.97,  # New parameter for the 97% rule
             'weekly_ma_period': 30,
             'fractal_definition_lookback': 1,
@@ -110,7 +109,6 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
         self._strokes: List[Stroke] = []
         self._active_peak_candidate: Optional[ActivePeakCandidateInfo] = None
         self._qualified_ref_high: Optional[QualifiedRefHighInfo] = None
-        # self._last_downstroke: Optional[LastDownstrokeInfo] = None # Potentially less used by new logic
         self._uptrend_invalidated: bool = False
 
     @property
@@ -124,7 +122,6 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
         self._strokes = []
         self._active_peak_candidate = None
         self._qualified_ref_high = None
-        # self._last_downstroke = None
         self._uptrend_invalidated = False
         logger.debug(f"[{self.strategy_name}] State initialized for new stock.")
 
@@ -250,12 +247,12 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
             k_next = self._merged_klines_state[i + 1]
             is_top = k_curr.h > k_prev.h and k_curr.h > k_next.h
             is_bottom = k_curr.l < k_prev.l and k_curr.l < k_next.l
-            if is_top and is_bottom: continue
+            if is_top and is_bottom: continue  # Skip bars that are both top and bottom fractal (e.g. inside bar)
             if is_top:
                 fractals.append(Fractal(kline=k_curr, m_idx=i, type=1))
             elif is_bottom:
                 fractals.append(Fractal(kline=k_curr, m_idx=i, type=-1))
-        fractals.sort(key=lambda f: (f.m_idx, -f.type))
+        fractals.sort(key=lambda f: (f.m_idx, -f.type))  # Sort by index, then top fractal first for same index
         return fractals
 
     def _connect_fractals_to_strokes_batch(self) -> List[Stroke]:
@@ -263,33 +260,58 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
         if len(self._fractals) < 2: return strokes
         min_bars_between_fractals = self.params['min_bars_between_fractals_bt']
         last_confirmed_fractal = self._fractals[0]
+
         for i in range(1, len(self._fractals)):
             current_fractal = self._fractals[i]
-            if current_fractal.type == last_confirmed_fractal.type:
+            if current_fractal.type == last_confirmed_fractal.type:  # Same type, check for higher high or lower low
                 if (current_fractal.type == 1 and current_fractal.kline.h > last_confirmed_fractal.kline.h) or \
                         (current_fractal.type == -1 and current_fractal.kline.l < last_confirmed_fractal.kline.l):
                     last_confirmed_fractal = current_fractal
-                continue
-            bars_between_merged = abs(current_fractal.m_idx - last_confirmed_fractal.m_idx) - 1
+                continue  # Continue to find the definitive fractal of this type in sequence
+
+            # Different type, potential stroke
+            bars_between_merged = abs(
+                current_fractal.m_idx - last_confirmed_fractal.m_idx) - 1  # Merged k-lines between fractal points
+
             if bars_between_merged < min_bars_between_fractals:
-                last_confirmed_fractal = current_fractal  # Crucial: ensure this assignment happens to progress
+                # Not enough bars for a valid stroke, but which fractal to keep?
+                # If new fractal "invalidates" old by being stronger (e.g. new low after a top, but too close)
+                # This part of logic might need refinement based on specific stroke definition rules for Chan theory.
+                # For now, simply moving to current_fractal as last_confirmed if it's "later" or more "extreme"
+                # or if it simply breaks the sequence.
+                # Let's assume we prefer the later fractal if too close, to avoid very short strokes
+                # This can be complex. A common approach: if a bottom fractal is followed by a top fractal too closely,
+                # and the top is higher than previous top, it might be preferred.
+                # However, if it's just a minor blip, we might ignore it.
+                # The current logic: if too short, current_fractal becomes last_confirmed_fractal.
+                # This means the stroke (last_confirmed -> current_fractal) is skipped.
+                # Then, if current_fractal.type == last_confirmed_fractal.type was the case, it means
+                # we are essentially overwriting last_confirmed_fractal with a "better" one of the same type.
+                # If types are different and distance is too small, we are effectively saying that the
+                # last_confirmed_fractal was not truly "confirmed" in the sequence that leads to a valid stroke.
+                last_confirmed_fractal = current_fractal  # Move to the current fractal
                 continue
+
             stroke_direction = 0;
             start_f, end_f = last_confirmed_fractal, current_fractal
-            if start_f.type == -1 and end_f.type == 1:  # Up
-                if end_f.kline.h > start_f.kline.l: stroke_direction = 1
-            elif start_f.type == 1 and end_f.type == -1:  # Down
-                if end_f.kline.l < start_f.kline.h: stroke_direction = -1
+
+            if start_f.type == -1 and end_f.type == 1:  # Upward stroke
+                if end_f.kline.h > start_f.kline.l:  # Ensure high of end is above low of start
+                    stroke_direction = 1
+            elif start_f.type == 1 and end_f.type == -1:  # Downward stroke
+                if end_f.kline.l < start_f.kline.h:  # Ensure low of end is below high of start
+                    stroke_direction = -1
+
             if stroke_direction != 0:
                 strokes.append(Stroke(start_f, end_f, stroke_direction, start_f.m_idx, end_f.m_idx))
-            last_confirmed_fractal = end_f  # Progress confirmed fractal
+
+            last_confirmed_fractal = end_f  # Move to the current fractal to start looking for the next stroke
         return strokes
 
     def _calculate_mas(self, df: pd.DataFrame) -> pd.DataFrame:
         df_copy = df.copy()
         df_copy[f'ma{self.params["ma_short"]}'] = df_copy['close'].rolling(window=self.params["ma_short"],
                                                                            min_periods=1).mean()
-        # Ensure self.ma30_col_name is correctly used for MA30 calculation
         df_copy[self.ma30_col_name] = df_copy['close'].rolling(window=self.params["ma_long"],
                                                                min_periods=1).mean()
         df_copy[f'ma_peak_qualify{self.params["ma_long_for_peak_qualify_period"]}'] = df_copy['close'].rolling(
@@ -304,15 +326,20 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
 
     def _update_active_peak_candidate(self, current_bar_data_with_mas: pd.Series,
                                       df_full_history_with_mas: pd.DataFrame):
-        new_candidate_found_this_step = False  # Track if a new peak is found in this specific call
+        new_candidate_found_this_step = False
         # Check strokes for peak candidates
-        for stroke in reversed(self._strokes):
+        for stroke in reversed(self._strokes):  # Iterate from most recent strokes
             if stroke.direction == 1:  # Upward stroke
-                original_peak_bar_idx = stroke.end_fractal.kline.high_idx
+                # original_peak_bar_idx is the index in the original daily_df
+                original_peak_bar_idx = stroke.end_fractal.kline.high_idx  # kline.high_idx refers to raw kline index with highest point
+
                 # Ensure stroke peak is within the history considered up to current_bar_data_with_mas
-                if original_peak_bar_idx > current_bar_data_with_mas.name: continue
+                # current_bar_data_with_mas.name is the index of the current bar in df_full_history_with_mas
+                if original_peak_bar_idx > current_bar_data_with_mas.name:
+                    continue
 
                 try:
+                    # Use .loc to access by original_df_index
                     peak_bar_data = df_full_history_with_mas.loc[original_peak_bar_idx]
                     peak_price = peak_bar_data['high']
                     ma_at_peak = peak_bar_data.get(f'ma_peak_qualify{self.params["ma_long_for_peak_qualify_period"]}')
@@ -321,135 +348,144 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
                         f"[{self.strategy_name}] Peak Idx {original_peak_bar_idx} from stroke not in full history for MA. Stock: {current_bar_data_with_mas.get('symbol', 'N/A')}, Current Bar Date: {current_bar_data_with_mas['date']}")
                     continue
 
-                if pd.isna(ma_at_peak): continue
+                if pd.isna(ma_at_peak):
+                    continue
 
                 if peak_price > ma_at_peak * self.params['ma_peak_threshold']:
-                    # Found a valid peak from a stroke
                     if self._active_peak_candidate is None or peak_price > self._active_peak_candidate.price:
                         self._active_peak_candidate = ActivePeakCandidateInfo(
-                            price=peak_price, date=peak_bar_data['date'],
-                            original_idx=original_peak_bar_idx, ma_at_peak=ma_at_peak, is_ma_valid=True)
+                            price=peak_price, date=peak_bar_data['date'],  # peak_bar_data['date'] is python date
+                            original_idx=original_peak_bar_idx,  # This is the index in df_full_history_with_mas
+                            ma_at_peak=ma_at_peak, is_ma_valid=True)
                         self._qualified_ref_high = None  # Reset qualified high if a new active peak is stronger
                         new_candidate_found_this_step = True
                         logger.debug(
                             f"[{self.strategy_name}] New active peak candidate from stroke: P={peak_price:.2f} D={peak_bar_data['date']} Idx={original_peak_bar_idx}")
+                        # No need to break, find the highest peak from strokes
 
-        # Check current bar as a potential peak candidate (e.g. new all time high in recent period)
+        # Check current bar as a potential peak candidate
         current_high = current_bar_data_with_mas['high']
+        current_bar_original_idx = current_bar_data_with_mas.name  # This is the index in df_full_history_with_mas
         ma_qualify_curr = current_bar_data_with_mas.get(
             f'ma_peak_qualify{self.params["ma_long_for_peak_qualify_period"]}')
 
         if pd.notna(ma_qualify_curr) and current_high > ma_qualify_curr * self.params['ma_peak_threshold']:
             if self._active_peak_candidate is None or current_high > self._active_peak_candidate.price:
                 self._active_peak_candidate = ActivePeakCandidateInfo(
-                    price=current_high, date=current_bar_data_with_mas['date'],
-                    original_idx=current_bar_data_with_mas.name, ma_at_peak=ma_qualify_curr, is_ma_valid=True)
+                    price=current_high, date=current_bar_data_with_mas['date'],  # current_bar_data_with_mas['date']
+                    original_idx=current_bar_original_idx,
+                    ma_at_peak=ma_qualify_curr, is_ma_valid=True)
                 self._qualified_ref_high = None  # Reset qualified high
                 new_candidate_found_this_step = True
                 logger.debug(
-                    f"[{self.strategy_name}] New active peak candidate from current bar: P={current_high:.2f} D={current_bar_data_with_mas['date']} Idx={current_bar_data_with_mas.name}")
+                    f"[{self.strategy_name}] New active peak candidate from current bar: P={current_high:.2f} D={current_bar_data_with_mas['date']} Idx={current_bar_original_idx}")
 
         if new_candidate_found_this_step:
-            self._uptrend_invalidated = False  # If a new valid peak is found, assume uptrend (for this peak) is not invalidated yet
+            self._uptrend_invalidated = False
 
     def _check_uptrend_invalidation(self, df_full_history_with_mas: pd.DataFrame, current_stock_code: str,
                                     current_eval_date: date):
         logger.debug(
             f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Entered _check_uptrend_invalidation.")
         logger.debug(
-            f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Current _qualified_ref_high: {self._qualified_ref_high}")
-        logger.debug(
-            f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Current _uptrend_invalidated flag: {self._uptrend_invalidated}")
+            f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Current _qualified_ref_high for invalidation check: {self._qualified_ref_high}")
 
-        if not self._qualified_ref_high or not self._qualified_ref_high.is_fully_qualified:
+        if not self._qualified_ref_high or not self._qualified_ref_high.is_fully_qualified:  # Check initial qualification too
             logger.debug(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Exiting _check_uptrend_invalidation: No qualified_ref_high or not fully qualified.")
-            return False
+                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Exiting _check_uptrend_invalidation: No qualified_ref_high or not initially fully qualified.")
+            return False  # False means "not invalidated" (because there's nothing to invalidate or it wasn't qualified to begin with)
 
         qrh_idx = self._qualified_ref_high.original_idx
         qrh_date = self._qualified_ref_high.date
         logger.debug(
-            f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] QualifiedRefHigh: Idx={qrh_idx}, Date={qrh_date}")
+            f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] QualifiedRefHigh for invalidation: Idx={qrh_idx}, Date={qrh_date}, Price={self._qualified_ref_high.price}")
 
         if qrh_idx not in df_full_history_with_mas.index:
             logger.warning(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] QualifiedRefHigh original_idx {qrh_idx} (date {qrh_date}) not found in df_full_history_with_mas. Cannot check invalidation.")
-            return False
+                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] QualifiedRefHigh original_idx {qrh_idx} (date {qrh_date}) not in df_full_history_with_mas. Cannot check invalidation.")
+            return False  # Cannot determine, assume not invalidated for safety, or handle as error
 
         qrh_loc = df_full_history_with_mas.index.get_loc(qrh_idx)
+        # df_after_qrh should contain all bars strictly AFTER the QRH bar, up to current_eval_date (which is the last bar in df_full_history_with_mas)
         df_after_qrh = df_full_history_with_mas.iloc[qrh_loc + 1:]
+
         logger.debug(
-            f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] df_after_qrh has {len(df_after_qrh)} rows. Is empty: {df_after_qrh.empty}")
+            f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] df_after_qrh for invalidation check has {len(df_after_qrh)} rows (from {df_after_qrh.iloc[0]['date'] if not df_after_qrh.empty else 'N/A'} to {df_after_qrh.iloc[-1]['date'] if not df_after_qrh.empty else 'N/A'}). Is empty: {df_after_qrh.empty}")
 
         if df_after_qrh.empty:
             logger.debug(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Exiting _check_uptrend_invalidation: df_after_qrh is empty.")
-            return False
+                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Exiting _check_uptrend_invalidation: df_after_qrh is empty (no bars after QRH to check).")
+            return False  # No bars after QRH, so it cannot be invalidated by subsequent action yet.
 
         ma30_threshold_pct = self.params['high_invalidate_close_below_ma30_pct']
         invalidation_reason = None
-        logger.debug(
-            f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Starting loop for Condition 1 (single day break).")
 
         # Condition 1: Single day close significantly below MA30
-        for idx, row in df_after_qrh.iterrows():
-            # --- 您可以在这里也加一些 print 或 logger.debug ---
+        for idx_after, row_after in df_after_qrh.iterrows():
             logger.debug(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Checking row: Date={row['date']}, Close={row['close']}, MA30={row.get(self.ma30_col_name)}")
-            close_price = row['close']
-            ma30_val = row.get(self.ma30_col_name)
+                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Invalidation Check (Cond1) on row: Date={row_after['date']}, Close={row_after['close']}, MA30={row_after.get(self.ma30_col_name)}"
+            )
+            close_price = row_after['close']
+            ma30_val = row_after.get(self.ma30_col_name)
             if pd.notna(ma30_val) and pd.notna(close_price):
                 if close_price < ma30_val * ma30_threshold_pct:
                     invalidation_reason = (
-                        f"Close {close_price:.2f} on {row['date']} < {ma30_threshold_pct * 100:.0f}% of MA30 {ma30_val:.2f}. "
+                        f"Close {close_price:.2f} on {row_after['date']} < {ma30_threshold_pct * 100:.0f}% of MA30 {ma30_val:.2f}. "
                         f"QRH was P={self._qualified_ref_high.price:.2f} on {qrh_date}."
                     )
                     logger.debug(
-                        f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Condition 1 met: {invalidation_reason}")
+                        f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Condition 1 met for invalidation: {invalidation_reason}")
                     break
-        if invalidation_reason:
-            pass  # Skip to invalidation
-        else:
+
+        if not invalidation_reason:  # Only check condition 2 if condition 1 not met
             # Condition 2: Three consecutive closes below MA30
             consecutive_closes_below_ma30 = 0
-            for idx, row in df_after_qrh.iterrows():
-                close_price = row['close']
-                ma30_val = row.get(self.ma30_col_name)
+            for idx_after, row_after in df_after_qrh.iterrows():
+                logger.debug(
+                    f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Invalidation Check (Cond2) on row: Date={row_after['date']}, Close={row_after['close']}, MA30={row_after.get(self.ma30_col_name)}, ConsecutiveBelow={consecutive_closes_below_ma30}"
+                )
+                close_price = row_after['close']
+                ma30_val = row_after.get(self.ma30_col_name)
                 if pd.notna(ma30_val) and pd.notna(close_price):
                     if close_price < ma30_val:
                         consecutive_closes_below_ma30 += 1
                         if consecutive_closes_below_ma30 >= 3:
                             invalidation_reason = (
-                                f"3 consecutive closes below MA30 ending on {row['date']}. "
+                                f"3 consecutive closes below MA30 ending on {row_after['date']}. "
                                 f"QRH was P={self._qualified_ref_high.price:.2f} on {qrh_date}."
                             )
-                            break  # Found violation for condition 2
+                            logger.debug(
+                                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Condition 2 met for invalidation: {invalidation_reason}")
+                            break
                     else:
-                        consecutive_closes_below_ma30 = 0  # Reset counter
-                else:  # If data is NaN, reset counter as continuity is broken
+                        consecutive_closes_below_ma30 = 0
+                else:
                     consecutive_closes_below_ma30 = 0
 
         if invalidation_reason:
             logger.info(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] QualifiedRefHigh invalidated. Reason: {invalidation_reason}")
+                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] QualifiedRefHigh P={self._qualified_ref_high.price:.2f} D={self._qualified_ref_high.date} IS invalidated. Reason: {invalidation_reason}")
             self._active_peak_candidate = None
             self._qualified_ref_high = None
-            self._uptrend_invalidated = True  # General flag indicating some form of trend weakness / high invalidation
-            return True
+            self._uptrend_invalidated = True
+            return True  # True means "invalidated"
 
-        return False
+        logger.debug(
+            f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] QualifiedRefHigh P={self._qualified_ref_high.price:.2f} D={self._qualified_ref_high.date} REMAINS VALID after checking subsequent bars.")
+        return False  # False means "not invalidated"
 
     def _validate_and_set_qualified_ref_high(self, df_full_history_with_mas: pd.DataFrame, current_stock_code: str,
-                                             current_eval_date: date):
-        if self._uptrend_invalidated:  # If general uptrend invalidated by other means (or previously by new rules)
-            self._qualified_ref_high = None
+                                             current_eval_date: date) -> bool:  # Return bool indicating if a valid QRH was set
+        if self._uptrend_invalidated:
+            self._qualified_ref_high = None  # Ensure it's cleared if general uptrend was marked invalid
             return False
 
         if not self._active_peak_candidate or not self._active_peak_candidate.is_ma_valid:
-            self._qualified_ref_high = None
+            self._qualified_ref_high = None  # Clear if no active candidate or its MA wasn't valid
             return False
 
         candidate = self._active_peak_candidate
+
         if candidate.original_idx not in df_full_history_with_mas.index:
             logger.warning(
                 f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Active peak original_idx {candidate.original_idx} (date: {candidate.date}) not found in history for gain calculation.")
@@ -457,10 +493,7 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
             return False
 
         peak_loc = df_full_history_with_mas.index.get_loc(candidate.original_idx)
-        # Ensure lookback for gain does not go out of bounds
         start_loc_for_gain = max(0, peak_loc - self.params['peak_recent_gain_days'] + 1)
-
-        # Slice up to and including the peak_loc
         period_df_for_gain = df_full_history_with_mas.iloc[start_loc_for_gain: peak_loc + 1]
 
         if period_df_for_gain.empty:
@@ -471,38 +504,49 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
 
         high_in_period = period_df_for_gain['high'].max()
         low_in_period = period_df_for_gain['low'].min()
-
         is_recent_gain_valid = False
         gain_ratio_calculated = np.nan
 
-        if pd.notna(low_in_period) and low_in_period > 1e-9 and pd.notna(
-                high_in_period):  # Avoid division by zero/small_number
+        if pd.notna(low_in_period) and low_in_period > 1e-9 and pd.notna(high_in_period):
             gain_ratio_calculated = high_in_period / low_in_period
-            if gain_ratio_calculated > self.params['peak_recent_gain_ratio']:
+            if gain_ratio_calculated >= self.params['peak_recent_gain_ratio']:  # Use >= for gain ratio
                 is_recent_gain_valid = True
 
-        # A peak candidate becomes a qualified reference high if its MA was valid AND recent gain is valid
-        is_fully_qualified_now = candidate.is_ma_valid and is_recent_gain_valid
+        is_initially_fully_qualified = candidate.is_ma_valid and is_recent_gain_valid
 
-        q_info = QualifiedRefHighInfo(
+        temp_qrh_info = QualifiedRefHighInfo(
             price=candidate.price, date=candidate.date, original_idx=candidate.original_idx,
             ma_at_high=candidate.ma_at_peak, is_ma_valid=candidate.is_ma_valid,
             is_recent_gain_valid=is_recent_gain_valid,
-            is_fully_qualified=is_fully_qualified_now
+            is_fully_qualified=is_initially_fully_qualified
         )
-        self._qualified_ref_high = q_info  # Store it regardless of full qualification for logging/debugging
 
-        if is_fully_qualified_now:
+        if is_initially_fully_qualified:
+            self._qualified_ref_high = temp_qrh_info  # Tentatively set
             logger.debug(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Set qualified ref high: P={q_info.price:.2f} D={q_info.date}, GainRatio={gain_ratio_calculated:.2f}. Details: {q_info}")
+                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Candidate QRH P={candidate.price:.2f} D={candidate.date} passed initial MA and gain checks. Now checking for post-high invalidation..."
+            )
+
+            # Immediately check this candidate for post-high invalidation
+            if self._check_uptrend_invalidation(df_full_history_with_mas, current_stock_code, current_eval_date):
+                # _check_uptrend_invalidation already set self._qualified_ref_high = None and self._uptrend_invalidated = True
+                logger.info(  # Changed to INFO as this is an important invalidation event
+                    f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Candidate QRH P={candidate.price:.2f} D={candidate.date} was immediately invalidated by post-high price action. No QRH set."
+                )
+                return False  # Failed to set a valid QRH
+            else:
+                logger.info(  # Changed to INFO for successful QRH confirmation
+                    f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Successfully set and validated QualifiedRefHigh: P={self._qualified_ref_high.price:.2f} D={self._qualified_ref_high.date}, GainRatio={gain_ratio_calculated:.2f}. Details: {self._qualified_ref_high}")
+                return True  # Successfully set and validated QRH
         else:
+            self._qualified_ref_high = temp_qrh_info  # Store even if not fully qualified, for logging/state
             reason_for_fail = []
             if not candidate.is_ma_valid: reason_for_fail.append("MA_at_peak_invalid")
             if not is_recent_gain_valid: reason_for_fail.append(
                 f"RecentGainInvalid (Ratio:{gain_ratio_calculated:.2f} vs Need:{self.params['peak_recent_gain_ratio']})")
             logger.debug(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Active peak P={candidate.price:.2f} D={candidate.date} did NOT qualify. Reasons: {', '.join(reason_for_fail)}. StoredInfo: {q_info}")
-        return is_fully_qualified_now
+                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Active peak P={candidate.price:.2f} D={candidate.date} did NOT initially qualify. Reasons: {', '.join(reason_for_fail)}. StoredInfo: {self._qualified_ref_high}")
+            return False  # Failed to set a valid QRH
 
     def run_for_stock(self, stock_code: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[StrategyResult]:
         self._initialize_state_for_stock()
@@ -517,12 +561,12 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
         daily_df = daily_df_orig.copy()
         if not pd.api.types.is_datetime64_any_dtype(daily_df['date']):
             daily_df['date'] = pd.to_datetime(daily_df['date'])
-        if hasattr(daily_df['date'].dt, 'date'):
+        if hasattr(daily_df['date'].dt, 'date'):  # If already datetime.date objects
             daily_df['date'] = daily_df['date'].dt.date
-        else:
-            daily_df['date'] = daily_df['date'].apply(lambda x: x.date() if isinstance(x, pd.Timestamp) else x)
+        else:  # Convert if pd.Timestamp or other
+            daily_df['date'] = daily_df['date'].apply(lambda x: x.date() if isinstance(x, pd.Timestamp) else (
+                pd.to_datetime(x).date() if not isinstance(x, date) else x))
 
-        # Filter data up to and including the current_date for analysis
         df_full_history_for_analysis = daily_df[daily_df['date'] <= current_date].copy()
         if df_full_history_for_analysis.empty:
             logger.info(
@@ -531,33 +575,28 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
 
         min_bars_needed = max(self.params['ma_long'], self.params['ma_long_for_peak_qualify_period'],
                               self.params['peak_recent_gain_days']) + self.params.get('fractal_definition_lookback',
-                                                                                      1) + 5  # Ensure enough for all calcs
+                                                                                      1) * 2 + 5
         if len(df_full_history_for_analysis) < min_bars_needed:
             logger.info(
                 f"[{self.strategy_name}@{stock_code}@{current_date}] Data too short ({len(df_full_history_for_analysis)} < {min_bars_needed}) for full analysis.")
             return results
 
         df_full_history_with_mas = self._calculate_mas(df_full_history_for_analysis.copy())
-        if df_full_history_with_mas.empty:  # Should not happen if previous checks pass
+        if df_full_history_with_mas.empty:
             logger.error(
                 f"[{self.strategy_name}@{stock_code}@{current_date}] df_full_history_with_mas is empty after MA calculation.")
             return results
         current_bar_data_with_mas = df_full_history_with_mas.iloc[-1]
 
-        # --- Stroke and Fractal Analysis ---
-        # Determine date range for pattern identification (fractals/strokes)
-        # Look back N days from the current evaluation date
         lookback_start_date_for_pattern = current_date - timedelta(
             days=self.params['pattern_identification_lookback_days'])
-
-        # Slice the historical data (without MAs yet for this part) for pattern analysis period
         df_slice_for_patterns = df_full_history_for_analysis[
             df_full_history_for_analysis['date'] >= lookback_start_date_for_pattern].copy()
 
         if not df_slice_for_patterns.empty:
             raw_klines_for_pattern_period = self._df_to_raw_klines(df_slice_for_patterns)
-            if raw_klines_for_pattern_period:  # Build merged k-lines and identify fractals/strokes
-                self._merged_klines_state = []  # Re-initialize for current run
+            if raw_klines_for_pattern_period:
+                self._merged_klines_state = []
                 self._current_segment_trend_state = 0
                 for raw_kline in raw_klines_for_pattern_period:
                     self._process_raw_kline_for_merging(raw_kline)
@@ -567,16 +606,13 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
                     self._fractals = self._identify_fractals_batch()
                     if len(self._fractals) >= 2:
                         self._strokes = self._connect_fractals_to_strokes_batch()
-        # --- End Stroke and Fractal Analysis ---
 
-        weekly_ma_val = None  # Initialize weekly MA value
+        weekly_ma_val = None
         weekly_df_orig = data.get("weekly")
         if weekly_df_orig is not None and not weekly_df_orig.empty and 'date' in weekly_df_orig.columns:
             weekly_df = weekly_df_orig.copy()
             if not pd.api.types.is_datetime64_any_dtype(weekly_df['date']):
                 weekly_df['date'] = pd.to_datetime(weekly_df['date'])
-
-            # Ensure date column is python date objects
             if hasattr(weekly_df['date'].dt, 'date'):
                 weekly_df['date'] = weekly_df['date'].dt.date
             else:
@@ -586,55 +622,47 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
             if not weekly_df_history.empty:
                 weekly_df_with_mas = self._calculate_weekly_mas(weekly_df_history)
                 if not weekly_df_with_mas.empty:
-                    # Get MA from the last row of the weekly data (up to current_date)
                     weekly_ma_val = weekly_df_with_mas.iloc[-1].get(f'weekly_ma{self.params["weekly_ma_period"]}')
 
         # Core Logic Flow:
-        # 1. Check if the current qualified high (if any) is invalidated by NEW rules.
-        #    This uses df_full_history_with_mas which has all data up to current_eval_date.
-        if self._check_uptrend_invalidation(df_full_history_with_mas, stock_code, current_date):
-            logger.debug(
-                f"[{self.strategy_name}@{stock_code}@{current_date}] Qualified high was invalidated by new rules.")
-            # _qualified_ref_high and _active_peak_candidate are reset within the method if invalidated.
-            # _uptrend_invalidated is also set.
+        # 1. _uptrend_invalidated is False at the start of each run_for_stock.
+        #    If a previous QRH existed and was invalidated by _check_uptrend_invalidation (called from within _validate_and_set_qualified_ref_high),
+        #    _uptrend_invalidated would be true, and _active_peak_candidate would be None.
 
-        # 2. If not invalidated (or no QRH to invalidate), try to update/find an active peak candidate.
-        #    This uses strokes (from pattern window) and current bar data.
-        #    The df_full_history_with_mas is used to get MA values at the time of those peaks.
-        if not self._uptrend_invalidated:  # Only try to find new peaks if trend not marked as generally invalid
+        # 2. Update/find an active peak candidate.
+        #    This is done if _uptrend_invalidated is currently False.
+        #    _update_active_peak_candidate might set _uptrend_invalidated to False if it finds a new strong peak.
+        if not self._uptrend_invalidated:
             self._update_active_peak_candidate(current_bar_data_with_mas, df_full_history_with_mas)
 
-        # 3. Try to validate the current active_peak_candidate to become a qualified_ref_high.
-        #    This also uses df_full_history_with_mas for gain calculations.
-        #    This step will overwrite _qualified_ref_high if a new one is validated.
-        #    If _uptrend_invalidated was set by _check_uptrend_invalidation, this validation will likely fail or be skipped internally.
-        self._validate_and_set_qualified_ref_high(df_full_history_with_mas, stock_code, current_date)
+        # 3. Validate the current active_peak_candidate.
+        #    This function now internally calls _check_uptrend_invalidation for any QRH it's about to confirm.
+        #    It returns True if a fully qualified and *still valid* QRH is set.
+        is_qrh_valid_and_set = self._validate_and_set_qualified_ref_high(df_full_history_with_mas, stock_code,
+                                                                         current_date)
 
         # --- Signal Generation ---
-        if self._qualified_ref_high and self._qualified_ref_high.is_fully_qualified:
+        if is_qrh_valid_and_set and self._qualified_ref_high and self._qualified_ref_high.is_fully_qualified:  # Redundant check for self._qualified_ref_high here but safe
             qrh = self._qualified_ref_high
             ref_high_price = qrh.price
             current_close = current_bar_data_with_mas['close']
             current_low = current_bar_data_with_mas['low']
             ma_short_val = current_bar_data_with_mas.get(f'ma{self.params["ma_short"]}')
-            ma_long_val = current_bar_data_with_mas.get(self.ma30_col_name)  # Use stored MA30 col name
+            ma_long_val = current_bar_data_with_mas.get(self.ma30_col_name)
 
             ma_long_prev_val = None
-            if len(df_full_history_with_mas) > 1:  # Ensure there is a previous bar
-                # Get MA30 from the second to last row (previous bar)
+            if len(df_full_history_with_mas) > 1:
                 ma_long_prev_val = df_full_history_with_mas.iloc[-2].get(self.ma30_col_name)
 
-            # Prepare strings for logging, handling potential NaN values
             ma_long_str = f"{ma_long_val:.2f}" if pd.notna(ma_long_val) else "N/A"
             weekly_ma_str = f"{weekly_ma_val:.2f}" if pd.notna(weekly_ma_val) else "N/A"
             ma_short_str = f"{ma_short_val:.2f}" if pd.notna(ma_short_val) else "N/A"
             ma_long_prev_str = f"{ma_long_prev_val:.2f}" if pd.notna(ma_long_prev_val) else "N/A"
 
-            # Buy Conditions (Unchanged from your provided snippet)
             cond_A_pullback_from_high = current_close < ref_high_price
             cond_B_near_ma30 = pd.notna(ma_long_val) and \
                                (current_low <= ma_long_val * 1.05) and \
-                               (current_low >= ma_long_val * 0.97)  # Original 0.97 threshold for pullback buy
+                               (current_low >= ma_long_val * 0.97)
             cond_C_above_weekly_ma = pd.notna(weekly_ma_val) and current_close > weekly_ma_val
             cond_D_short_ma_above_long_ma = pd.notna(ma_short_val) and pd.notna(ma_long_val) and \
                                             ma_short_val > ma_long_val
@@ -652,7 +680,6 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
 
             if cond_A_pullback_from_high and cond_B_near_ma30 and cond_C_above_weekly_ma and \
                     cond_D_short_ma_above_long_ma and cond_E_long_ma_rising:
-
                 signal_details = {
                     "reference_high_price": f"{ref_high_price:.2f}",
                     "reference_high_date": qrh.date.isoformat() if isinstance(qrh.date, date) else str(qrh.date),
@@ -670,49 +697,43 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
                 }
                 results.append(
                     StrategyResult(stock_code, current_date, self.strategy_name, "BUY", details=signal_details))
-
                 logger.info(
                     f"[{self.strategy_name}@{stock_code}@{current_date}] BUY SIGNAL. RefHigh P={ref_high_price:.2f} D={qrh.date}. "
                     f"Trig C={current_close:.2f} L={current_low:.2f} MA{self.params['ma_long']}BuyRef={ma_long_str} WMA={weekly_ma_str}")
-            elif qrh and qrh.is_fully_qualified:  # Log if QRH exists but other conditions not met
+            elif qrh and qrh.is_fully_qualified:
                 logger.info(
                     f"[{self.strategy_name}@{stock_code}@{current_date}] Qualified high P={qrh.price:.2f} D={qrh.date} found but other BUY conditions not met.")
-        else:  # No qualified reference high, or it's not fully qualified
+        else:
             qrh_status = "None"
-            if self._qualified_ref_high:
-                qrh_status = f"Exists but NotFullyQualified (P={self._qualified_ref_high.price:.2f} D={self._qualified_ref_high.date} FullyQual={self._qualified_ref_high.is_fully_qualified})"
+            if self._qualified_ref_high:  # May exist but not fully qualified or invalidated
+                qrh_status = f"Exists but NotFullyQualified/Invalidated (P={self._qualified_ref_high.price:.2f} D={self._qualified_ref_high.date} FullyQual={self._qualified_ref_high.is_fully_qualified})"
             elif self._active_peak_candidate:
-                qrh_status = f"NoQRH, ActivePeak P={self._active_peak_candidate.price:.2f} D={self._active_peak_candidate.date}"
-            elif self._uptrend_invalidated:
-                qrh_status = "UptrendInvalidated earlier"
+                qrh_status = f"NoQRH, ActivePeak P={self._active_peak_candidate.price:.2f} D={self._active_peak_candidate.date} was not validated or was invalidated."
+            elif self._uptrend_invalidated:  # This flag is True if _check_uptrend_invalidation caused an invalidation
+                qrh_status = "UptrendInvalidated (QRH was invalidated by post-high price action)."
 
             logger.info(
-                f"[{self.strategy_name}@{stock_code}@{current_date}] No BUY signal. Reason: No (or not fully qualified) reference high. QRH_Status: {qrh_status}")
+                f"[{self.strategy_name}@{stock_code}@{current_date}] No BUY signal. Reason: No (or not fully qualified/validated) reference high. QRH_Status: {qrh_status}")
         return results
 
 
 if __name__ == "__main__":
     logging.basicConfig(
-        level=logging.DEBUG,  # DEBUG level for detailed output
+        level=logging.DEBUG,
         format='%(asctime)s - %(levelname)s - %(name)s - [%(funcName)s:%(lineno)d] - %(message)s',
         handlers=[logging.StreamHandler()]
     )
     test_logger = logging.getLogger(__name__ + "_test_main")
 
-    # --- Test Configuration ---
-    # Ensure this CSV file is in the same directory or provide a full path
     csv_file_path = 'stock_daily.csv'
-    stock_to_test = "000425"  # Example stock code
-    # Choose a date for testing that allows for sufficient historical data
-    date_to_test_str = "2025-05-09"  # Example date, adjust as needed
-    # --- End Test Configuration ---
+    stock_to_test = "000659"
+    date_to_test_str = "2025-05-09"  # Target date for signal generation
 
     target_date = datetime.strptime(date_to_test_str, "%Y-%m-%d").date()
 
     try:
         test_logger.info(f"Loading data from: {csv_file_path}")
         try:
-            # Assuming CSV has columns: date, open, high, low, close, volume, symbol
             daily_df_full = pd.read_csv(csv_file_path, thousands=',', dtype={'symbol': str})
             test_logger.info(f"CSV columns: {daily_df_full.columns.tolist()}")
         except FileNotFoundError:
@@ -723,32 +744,25 @@ if __name__ == "__main__":
             exit()
 
         test_logger.info(f"Loaded {len(daily_df_full)} total rows from CSV.")
-
         daily_df_stock = daily_df_full[daily_df_full['symbol'] == stock_to_test].copy()
         if daily_df_stock.empty:
             test_logger.error(f"No data found for stock {stock_to_test} in the CSV.")
             exit()
-
         test_logger.info(f"Found {len(daily_df_stock)} rows for stock {stock_to_test}.")
 
-        # Data Preprocessing
-        # Ensure 'date' is datetime and then convert to date objects
         try:
-            daily_df_stock['date'] = pd.to_datetime(daily_df_stock['date'])  # Handles various date formats
+            daily_df_stock['date'] = pd.to_datetime(daily_df_stock['date'])
         except Exception as e:
             test_logger.error(
-                f"Error converting 'date' column to datetime for stock {stock_to_test}: {e}. Ensure date format is consistent (e.g., YYYY-MM-DD or YYYY/MM/DD).")
+                f"Error converting 'date' column to datetime for stock {stock_to_test}: {e}. Ensure date format is consistent.")
             exit()
 
         numeric_cols = ['open', 'high', 'low', 'close', 'volume']
         for col in numeric_cols:
             daily_df_stock[col] = pd.to_numeric(daily_df_stock[col], errors='coerce')
-
-        daily_df_stock.dropna(subset=numeric_cols,
-                              inplace=True)  # Drop rows where essential price/volume data is missing
+        daily_df_stock.dropna(subset=numeric_cols, inplace=True)
         daily_df_stock.sort_values(by='date', inplace=True)
-        daily_df_stock.reset_index(drop=True, inplace=True)  # Reset index after sorting and potential drops
-
+        daily_df_stock.reset_index(drop=True, inplace=True)
         test_logger.info(f"Preprocessed daily data for {stock_to_test}. Rows after cleaning: {len(daily_df_stock)}")
 
         if len(daily_df_stock) > 0:
@@ -759,54 +773,33 @@ if __name__ == "__main__":
             if target_date < min_date_in_csv or target_date > max_date_in_csv:
                 test_logger.warning(
                     f"Target date {target_date} is outside the CSV data range for {stock_to_test} ({min_date_in_csv} to {max_date_in_csv}).")
-                if target_date > max_date_in_csv:
-                    test_logger.error(
-                        "Target date is after the last date in CSV. Cannot test accurately for this date.")
-                    # exit() # Allow to run if target date is within, but just a warning for now
             if target_date < min_date_in_csv:
                 test_logger.error("Target date is before the first date in CSV. Cannot test.")
                 exit()
-
         else:
             test_logger.error(f"No daily data remaining for {stock_to_test} after preprocessing. Check data quality.")
             exit()
 
-        # Prepare daily data for strategy (convert datetime64[ns] 'date' to python date objects)
         daily_df_stock_for_strategy = daily_df_stock.copy()
+        # Convert to python date objects for strategy, AFTER all pd.to_datetime and .dt operations
         daily_df_stock_for_strategy['date'] = daily_df_stock_for_strategy['date'].dt.date
 
-        # Generate Weekly Data from Daily Data
-        # Ensure the 'date' column is a DatetimeIndex for resampling
         daily_df_for_weekly_resample = daily_df_stock.set_index(pd.DatetimeIndex(daily_df_stock['date'])).copy()
         agg_dict = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum', 'symbol': 'first'}
-
-        # Resample to weekly, ending on Friday. label='right' means the week is labeled by its end date.
         weekly_df_stock = daily_df_for_weekly_resample.resample('W-FRI', label='right', closed='right').agg(agg_dict)
-        weekly_df_stock.dropna(subset=['close'],
-                               inplace=True)  # Drop weeks with no closing price (e.g., holidays if not handled)
-        weekly_df_stock.reset_index(inplace=True)  # 'date' column is now the end-of-week date
-
-        # Convert weekly 'date' column to python date objects
+        weekly_df_stock.dropna(subset=['close'], inplace=True)
+        weekly_df_stock.reset_index(inplace=True)
         weekly_df_stock['date'] = weekly_df_stock['date'].dt.date
-
         test_logger.info(f"Generated {len(weekly_df_stock)} weekly data rows for {stock_to_test}.")
 
-        # Setup and Run Strategy
         strategy_context = StrategyContext(current_date=target_date, strategy_params={
-            "AdaptedMAPullbackStrategy": {
-                # You can override default_params here if needed for the test
-                # 'peak_recent_gain_days': 25,
-                # 'high_invalidate_close_below_ma30_pct': 0.98
-            }
+            "AdaptedMAPullbackStrategy": {}
         })
         strategy_instance = AdaptedMAPullbackStrategy(context=strategy_context)
         test_logger.info(
             f"Strategy params being used for {strategy_instance.strategy_name}: {strategy_instance.params}")
 
-        data_for_strategy = {
-            "daily": daily_df_stock_for_strategy,
-            "weekly": weekly_df_stock
-        }
+        data_for_strategy = {"daily": daily_df_stock_for_strategy, "weekly": weekly_df_stock}
 
         test_logger.info(f"Running strategy for {stock_to_test} on {target_date.isoformat()}...")
         signals = strategy_instance.run_for_stock(
