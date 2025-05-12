@@ -19,7 +19,7 @@ from strategies.multi_level_cross_refactored_strategy import RefactoredMultiLeve
 
 # 导入基本面分析器
 from analysis.fundamental_analyzer import FundamentalAnalyzer
-
+from strategies.breakout_strategy import BreakoutStrategy
 # 数据库相关
 from db.database import SessionLocal # 假设 SessionLocal 和 init_db
 from db import crud
@@ -52,6 +52,7 @@ CONFIG = {
     "strategies_to_run": [
         AdaptedMAPullbackStrategy,
         RefactoredMultiLevelCrossStrategy,
+        BreakoutStrategy,
     ],
     "strategy_params": {  # 可选：为特定策略传递参数
         "AdaptedMAPullbackStrategy": {
@@ -59,6 +60,12 @@ CONFIG = {
         },
         "RefactoredMultiLevelCrossStrategy": {
             # "ma_list_map": { "daily": [5,10,20,60], ... } # 覆盖默认MA列表
+        },
+        "ChanBreakoutStrategy": { # <--- 为新策略配置参数 (可选)
+            'pullback_depth_pct': 0.2,
+            'max_price_vs_3year_low_ratio': 2,
+            'volume_ratio_threshold': 2.0,
+            # 'pattern_identification_lookback_days': 250, # 默认250天
         }
     }
 }
