@@ -5,7 +5,7 @@ import numpy as np
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional, Any, Tuple
 import logging
-
+from collections import namedtuple
 # Ensure correct import of base classes and shared data structures
 try:
     from .base_strategy import BaseStrategy, StrategyResult, StrategyContext

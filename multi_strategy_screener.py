@@ -3,7 +3,7 @@
 import pandas as pd
 import numpy as np
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta,time
 from sqlalchemy.orm import Session
 from typing import List, Dict, Type, Optional
 
@@ -71,23 +71,36 @@ CONFIG = {
 }
 
 
+
+
 def get_analysis_date() -> date:
     """
     确定用于分析的日期。
-    通常是当前日期前的一个交易日，或者用户指定的日期。
-    对于周日运行的脚本，可能是上周五。
+    如果当前时间在交易日收盘后（例如下午4点后），则使用当天日期。
+    否则，行为同以前，获取最近的已收盘交易日。
     """
-    today = date.today()  # 当前日期是 2025-05-11 (周日)
-    # 如果今天是周日，分析上周五 (T-2)
-    if today.weekday() == 6:  # 周日
-        return today - timedelta(days=2)
-    # 如果今天是周一，分析上周五 (T-3)
-    elif today.weekday() == 0:  # 周一
-        return today - timedelta(days=3)
-    # 其他工作日，分析前一天 (T-1)
-    else:
-        return today - timedelta(days=1)
+    now = datetime.now()
+    today = now.date()
+    trading_close_time = time(16, 0) # 假设下午4点为收盘后判断点
 
+    # 检查今天是否是周末
+    if today.weekday() >= 5: # 周六 (5) 或 周日 (6)
+        # 如果是周末，则分析上周五
+        if today.weekday() == 5: # 周六
+            return today - timedelta(days=1)
+        else: # 周日
+            return today - timedelta(days=2)
+    else: # 今天是工作日 (周一到周五)
+        # 检查当前时间是否在收盘后
+        if now.time() >= trading_close_time:
+            # 如果是收盘后，并且是工作日，则分析当天
+            return today
+        else:
+            # 如果是盘中，或者是周一的盘前（需要分析上周五）
+            if today.weekday() == 0: # 周一盘前
+                return today - timedelta(days=3) # 分析上周五
+            else: # 周二到周五盘前
+                return today - timedelta(days=1) # 分析前一个交易日
 
 def run_screener(analysis_date_str: Optional[str] = None):
     """

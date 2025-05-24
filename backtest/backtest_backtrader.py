@@ -129,9 +129,7 @@ class MyCommissionInfo(bt.CommInfoBase):
 
 # --- 回测参数 ---
 STOCK_POOL = {
-    #'000887': '中鼎股份',
-    #'300138': '晨光生物',
-    #'002480': '大金重工',
+    #'000887': '中鼎股份', '300138': '晨光生物', '002480': '大金重工',
     #'002607': '胜宏科技',
     '603920': '世运电路'
 }
@@ -147,12 +145,7 @@ if __name__ == '__main__':
     cerebro = bt.Cerebro(stdstats=False)  # Disable standard observers for cleaner output
 
     # Add strategy
-    cerebro.addstrategy(MAPullbackPeakCondBtStrategy,
-                        printlog=True,
-                        debug_stock='603920',
-                        debug_date='2024-10-16',  # 精确匹配这一天
-                        debug_date_is_start_date=False  # 或者不设置此参数，默认为False
-                        )
+    cerebro.addstrategy(MAPullbackPeakCondBtStrategy, printlog=True, max_position_ratio=MAX_SINGLE_POSITION_RATIO)
 
     data_loaded_count = 0
     for symbol in STOCK_POOL.keys():
