@@ -1,4 +1,4 @@
-# quant_platform/analysis/fundamental_analyzer.py
+# analysis/fundamental_analyzer.py
 
 import pandas as pd
 import numpy as np
@@ -6,6 +6,8 @@ import logging
 from typing import List, Dict, Optional, Any
 from datetime import date, timedelta, datetime
 from sqlalchemy.orm import Session
+
+from db.database import get_db_session
 
 # Assume these models are defined in your quant_platform.db.models
 # from quant_platform.db.models import StockDaily, StockFinancial
@@ -29,23 +31,71 @@ class FundamentalAnalyzer:
 
     def _safe_extract_json_value(self, report_data_json: Optional[Dict], key_chinese_name: str) -> Optional[float]:
         """
-        Safely extracts a numeric value from a JSONB-like dictionary (parsed from StockFinancial.data).
-        Handles None, empty strings, and conversion errors for financial data.
+        安全地从类 JSONB 字典（从 StockFinancial.data 解析而来）中提取数值。
+        处理 None、空字符串、特殊的非数字字符串（如 '--', 'N/A'）、
+        带中文单位（'万', '亿'）的数字、数字中的逗号以及转换错误。
         """
         if report_data_json is None:
             return None
+
         value = report_data_json.get(key_chinese_name)
-        if value is None or value == '':
+
+        if value is None:  # 处理键存在但值为 None 的情况
             return None
-        try:
-            if isinstance(value, str) and value.strip().lower() in ('--', 'n/a', '不适用', 'nan'):
-                return None
+
+        # 处理值已经是数字类型（int, float, bool）的情况
+        # bool 是 int 的子类，所以 False -> 0.0, True -> 1.0
+        if isinstance(value, (int, float)):
             num_value = float(value)
-            if np.isnan(num_value) or np.isinf(num_value):  # Handle explicit NaN/inf from float conversion
+            if np.isnan(num_value) or np.isinf(num_value):
+                return None
+            return num_value
+
+        # 从此处开始，我们期望 value 是字符串或未处理的类型
+        if not isinstance(value, str):
+            logger.debug(f"键 '{key_chinese_name}' 的值 '{value}' 不是字符串或可识别的数字类型。类型为: {type(value)}.")
+            return None
+
+        # 处理字符串值
+        processed_value_str = value.strip()
+
+        if not processed_value_str:  # 处理空字符串或strip后变为空字符串的情况
+            return None
+
+        # 检查特殊的非数字字符串（不区分大小写）
+        # 这些应在尝试带单位的数字转换前检查
+        if processed_value_str.lower() in ('--', 'n/a', '不适用', 'nan'):
+            return None
+
+        multiplier = 1.0
+        # 在移除单位/逗号之前，存储字符串的副本以进行更准确的处理尝试
+        numeric_part_str = processed_value_str
+
+        if '亿' in numeric_part_str:
+            multiplier = 100_000_000.0
+            numeric_part_str = numeric_part_str.replace('亿', '')
+        elif '万' in numeric_part_str:  # 使用 elif 以避免在已处理“亿”后再次处理“万”
+            multiplier = 10_000.0
+            numeric_part_str = numeric_part_str.replace('万', '')
+
+        # 移除单位后，再移除逗号，以处理类似 "1,234.56万" -> "1,234.56" -> "1234.56" 的情况
+        numeric_part_str = numeric_part_str.replace(',', '')
+
+        # 最后检查替换后字符串是否为空（例如，如果原始值仅为 "亿" 或 ","）
+        if not numeric_part_str.strip():  # 再次 strip 以防单位/逗号周围有空格
+            logger.debug(
+                f"键 '{key_chinese_name}' 的值 '{value}' (原始JSON值) 在处理后得到空的数字部分 ('{numeric_part_str}')。")
+            return None
+
+        try:
+            num_value = float(numeric_part_str) * multiplier
+            if np.isnan(num_value) or np.isinf(num_value):
                 return None
             return num_value
         except (ValueError, TypeError):
-            logger.debug(f"Could not convert financial value '{value}' for key '{key_chinese_name}' to float.")
+            # 记录从 JSON 中获取的原始值，以增加清晰度
+            logger.debug(f"无法将键 '{key_chinese_name}' 的财务值 '{value}' (原始JSON值) 转换为浮点数。"
+                         f"尝试解析的部分为: '{numeric_part_str}'，乘数为 {multiplier}.")
             return None
 
     def _get_total_shares(self, stock_code: str, trade_date: date) -> Optional[float]:
@@ -78,12 +128,13 @@ class FundamentalAnalyzer:
             return None
 
         if daily_data_entry and hasattr(daily_data_entry, 'volume') and hasattr(daily_data_entry, 'turnover'):
-            volume = daily_data_entry.volume
-            turnover_rate = daily_data_entry.turnover  # User confirmed 'turnover' field
+            volume_in_lots = daily_data_entry.volume
+            turnover_rate = daily_data_entry.turnover
 
-            if volume is not None and turnover_rate is not None and turnover_rate > 1e-9:  # Avoid division by zero/small num
-                # Assuming turnover_rate is in percentage (e.g., 1.5 for 1.5%)
-                return volume / (turnover_rate / 100.0)
+            if volume_in_lots is not None and turnover_rate is not None and turnover_rate > 1e-9:
+                # 假设1手 = 100股
+                actual_volume_in_shares = volume_in_lots * 100.0
+                return actual_volume_in_shares / (turnover_rate / 100.0)
             else:
                 logger.debug(
                     f"[{stock_code}@{trade_date.isoformat()}] Volume or turnover rate is invalid for total shares calculation (V:{volume}, T:{turnover_rate}).")
@@ -138,11 +189,11 @@ class FundamentalAnalyzer:
             # Let's assume crud.get_latest_annual_financial_report(session, stock_code, report_date_lte, report_type_db_key)
             # Based on loader.py, we can adapt load_multiple_financial_reports's behavior
             all_relevant_reports = loader.load_multiple_financial_reports(
-                db_session=self.db_session,  # Assuming loader can accept session or uses global engine
+
                 symbol=stock_code,
                 report_type=report_type_db_key,
                 num_years=4,  # Fetch enough years to cover 3-year check and recent ones
-                signal_date_lte=signal_date  # Add this filter to loader if not present
+
             )
 
             if not all_relevant_reports:
@@ -383,3 +434,82 @@ class FundamentalAnalyzer:
                 results[key] = str(results[key])  # e.g. "inf" or "-inf"
 
         return results
+
+
+if __name__ == '__main__':
+    import logging
+    import json
+    from datetime import date, datetime # 确保 datetime 也导入了
+    import numpy as np
+    import pandas as pd
+
+    # --- 配置日志 ---
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__) # 为 main 代码块定义 logger
+
+    # --- 从项目中导入实际模块 ---
+    # 确保 Python 解释器可以找到这些模块
+    # 这通常需要从项目的根目录运行，或者设置 PYTHONPATH
+    from db.database import get_db_session #
+    # FundamentalAnalyzer 内部会导入 db.crud 和 data_processing.loader
+
+    logger.info("--- 开始 FundamentalAnalyzer 针对 603920 的真实数据测试 ---")
+
+    # 1. 获取数据库会话
+    # 使用 context manager 来确保会话正确关闭
+    db_sess = None
+    try:
+        with get_db_session() as session:
+            if session is None:
+                logger.error("未能获取数据库会话，测试中止。请检查数据库配置和连接。")
+                exit(1)
+            db_sess = session
+
+            # 2. 实例化 FundamentalAnalyzer
+            analyzer = FundamentalAnalyzer(db_session=db_sess)
+
+            stock_to_test = "603920"
+            test_signal_date = date(2025, 5, 23)
+            test_current_price = 26.00
+
+            # 3. 测试 analyze_stock 方法
+            logger.info(f"\n--- 测试 analyze_stock: 股票代码 {stock_to_test}, 日期 {test_signal_date}, 价格 {test_current_price} ---")
+            analysis_results = analyzer.analyze_stock(
+                stock_code=stock_to_test,
+                signal_date=test_signal_date,
+                current_price=test_current_price
+            )
+
+            # 自定义 JSON 编码器以处理 numpy 类型和日期，用于美化打印
+            class NpAndDateEncoder(json.JSONEncoder):
+                def default(self, obj):
+                    if isinstance(obj, np.integer):
+                        return int(obj)
+                    if isinstance(obj, np.floating):
+                        if np.isnan(obj): return None
+                        if np.isinf(obj): return str(obj)
+                        return float(obj)
+                    if isinstance(obj, np.ndarray):
+                        return obj.tolist()
+                    if isinstance(obj, (datetime, date)): # 处理 date/datetime 对象
+                        return obj.isoformat()
+                    if pd.isna(obj):
+                        return None
+                    return super(NpAndDateEncoder, self).default(obj)
+
+            results_str = json.dumps(analysis_results, indent=4, ensure_ascii=False, cls=NpAndDateEncoder)
+            print("\n分析结果:")
+            print(results_str)
+
+            if analysis_results.get('error_reason'):
+                logger.warning(f"股票 {stock_to_test} 的错误原因: {analysis_results.get('error_reason')}")
+
+            # 根据您的实际数据和预期，您可以在这里添加断言
+            # 例如:
+            # if 'pe' in analysis_results and not pd.isna(analysis_results['pe']):
+            #     assert 0 < analysis_results['pe'] < 100, f"PE值异常: {analysis_results['pe']}"
+
+    except Exception as e:
+        logger.error(f"运行 FundamentalAnalyzer 测试时发生严重错误: {e}", exc_info=True)
+    finally:
+        logger.info("\n--- FundamentalAnalyzer 真实数据测试结束 ---")
