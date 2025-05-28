@@ -4,23 +4,20 @@ import pandas as pd
 import numpy as np
 import logging
 from typing import List, Dict, Optional, Any
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime  # datetime 确保存在
 from sqlalchemy.orm import Session
 
+# 从您的项目中导入
 from db.database import get_db_session
+from db import crud  # 确保 crud 可被导入
 
-# Assume these models are defined in your quant_platform.db.models
-# from quant_platform.db.models import StockDaily, StockFinancial
-
-# Assume these crud functions will be available in quant_platform.db.crud
-# We will define their expected signatures and behavior in comments.
-# from quant_platform.db import crud
+# from db.models import StockFinancial # 如果需要显式类型提示crud返回内容中的对象
 
 logger = logging.getLogger(__name__)
 
 # Constants from your multi_level_cross_strategy_new.py
-NET_PROFIT_FIELD = '归属于母公司所有者的净利润'  # User confirmed this is the JSON key
-REVENUE_FIELD = '营业总收入'  # User confirmed this is the JSON key
+NET_PROFIT_FIELD = '归属于母公司所有者的净利润'
+REVENUE_FIELD = '营业总收入'
 PE_THRESHOLD = 30.0
 PEG_LIKE_THRESHOLD = 1.0
 
@@ -31,228 +28,206 @@ class FundamentalAnalyzer:
 
     def _safe_extract_json_value(self, report_data_json: Optional[Dict], key_chinese_name: str) -> Optional[float]:
         """
-        安全地从类 JSONB 字典（从 StockFinancial.data 解析而来）中提取数值。
-        处理 None、空字符串、特殊的非数字字符串（如 '--', 'N/A'）、
-        带中文单位（'万', '亿'）的数字、数字中的逗号以及转换错误。
+        安全地从类 JSONB 字典中提取数值。
+        优先尝试精确匹配 key_chinese_name。
+        如果精确匹配失败或值无效，则尝试查找 JSON 中键名包含 key_chinese_name 的项。
+        处理 None、空字符串、特殊非数字字符串、带单位（'万', '亿'）的数字、数字中的逗号及转换错误。
         """
         if report_data_json is None:
             return None
 
-        value = report_data_json.get(key_chinese_name)
-
-        if value is None:  # 处理键存在但值为 None 的情况
-            return None
-
-        # 处理值已经是数字类型（int, float, bool）的情况
-        # bool 是 int 的子类，所以 False -> 0.0, True -> 1.0
-        if isinstance(value, (int, float)):
-            num_value = float(value)
-            if np.isnan(num_value) or np.isinf(num_value):
+        # 内部辅助函数，用于解析具体的值
+        def _parse_value(value_to_parse: Any, original_key_for_log: str) -> Optional[float]:
+            if value_to_parse is None:
                 return None
-            return num_value
 
-        # 从此处开始，我们期望 value 是字符串或未处理的类型
-        if not isinstance(value, str):
-            logger.debug(f"键 '{key_chinese_name}' 的值 '{value}' 不是字符串或可识别的数字类型。类型为: {type(value)}.")
-            return None
+            # 处理值已经是数字类型（int, float, bool）的情况
+            if isinstance(value_to_parse, (int, float)):
+                num_val = float(value_to_parse)
+                if np.isnan(num_val) or np.isinf(num_val):
+                    return None
+                return num_val
 
-        # 处理字符串值
-        processed_value_str = value.strip()
-
-        if not processed_value_str:  # 处理空字符串或strip后变为空字符串的情况
-            return None
-
-        # 检查特殊的非数字字符串（不区分大小写）
-        # 这些应在尝试带单位的数字转换前检查
-        if processed_value_str.lower() in ('--', 'n/a', '不适用', 'nan'):
-            return None
-
-        multiplier = 1.0
-        # 在移除单位/逗号之前，存储字符串的副本以进行更准确的处理尝试
-        numeric_part_str = processed_value_str
-
-        if '亿' in numeric_part_str:
-            multiplier = 100_000_000.0
-            numeric_part_str = numeric_part_str.replace('亿', '')
-        elif '万' in numeric_part_str:  # 使用 elif 以避免在已处理“亿”后再次处理“万”
-            multiplier = 10_000.0
-            numeric_part_str = numeric_part_str.replace('万', '')
-
-        # 移除单位后，再移除逗号，以处理类似 "1,234.56万" -> "1,234.56" -> "1234.56" 的情况
-        numeric_part_str = numeric_part_str.replace(',', '')
-
-        # 最后检查替换后字符串是否为空（例如，如果原始值仅为 "亿" 或 ","）
-        if not numeric_part_str.strip():  # 再次 strip 以防单位/逗号周围有空格
-            logger.debug(
-                f"键 '{key_chinese_name}' 的值 '{value}' (原始JSON值) 在处理后得到空的数字部分 ('{numeric_part_str}')。")
-            return None
-
-        try:
-            num_value = float(numeric_part_str) * multiplier
-            if np.isnan(num_value) or np.isinf(num_value):
+            # 期望 value_to_parse 是字符串
+            if not isinstance(value_to_parse, str):
+                logger.debug(
+                    f"值 '{value_to_parse}' (来自键 '{original_key_for_log}') 不是字符串或可识别的数字类型。类型为: {type(value_to_parse)}.")
                 return None
-            return num_value
-        except (ValueError, TypeError):
-            # 记录从 JSON 中获取的原始值，以增加清晰度
-            logger.debug(f"无法将键 '{key_chinese_name}' 的财务值 '{value}' (原始JSON值) 转换为浮点数。"
-                         f"尝试解析的部分为: '{numeric_part_str}'，乘数为 {multiplier}.")
-            return None
+
+            # 处理字符串值
+            processed_value_str = value_to_parse.strip()
+
+            if not processed_value_str:  # 处理空字符串或strip后变为空字符串的情况
+                return None
+
+            if processed_value_str.lower() in ('--', 'n/a', '不适用', 'nan'):
+                return None
+
+            multiplier = 1.0
+            numeric_part_str = processed_value_str
+
+            if '亿' in numeric_part_str:
+                multiplier = 100_000_000.0
+                numeric_part_str = numeric_part_str.replace('亿', '')
+            elif '万' in numeric_part_str:
+                multiplier = 10_000.0
+                numeric_part_str = numeric_part_str.replace('万', '')
+
+            numeric_part_str = numeric_part_str.replace(',', '')
+
+            if not numeric_part_str.strip():
+                logger.debug(
+                    f"值 '{value_to_parse}' (来自键 '{original_key_for_log}') 在处理后得到空的数字部分 ('{numeric_part_str}')。")
+                return None
+
+            try:
+                num_val = float(numeric_part_str) * multiplier
+                if np.isnan(num_val) or np.isinf(num_val):
+                    return None
+                return num_val
+            except (ValueError, TypeError):
+                logger.debug(f"无法将值 '{value_to_parse}' (来自键 '{original_key_for_log}') 转换为浮点数。"
+                             f"尝试解析的部分为: '{numeric_part_str}'，乘数为 {multiplier}.")
+                return None
+
+        # --- 主要逻辑开始 ---
+        # 1. 尝试精确匹配
+        exact_value = report_data_json.get(key_chinese_name)
+        parsed_exact_value = _parse_value(exact_value, key_chinese_name)  # 使用辅助函数解析
+
+        if parsed_exact_value is not None:
+            logger.debug(f"为 '{key_chinese_name}' 找到精确匹配，原始值: '{exact_value}', 解析后: {parsed_exact_value}")
+            return parsed_exact_value
+        else:
+            # 如果 exact_value 存在但解析失败，日志已在 _parse_value 中记录
+            # 如果 exact_value 本身是 None (键不存在)，_parse_value 会返回 None
+            logger.debug(f"未能通过精确匹配 '{key_chinese_name}' 获取可用值 (原始值: '{exact_value}')。尝试模糊匹配...")
+
+        # 2. 如果精确匹配失败或值无效，则尝试模糊匹配 (查找包含 key_chinese_name 的键)
+        #    迭代顺序通常是字典的插入顺序 (Python 3.7+)
+        for json_actual_key, json_actual_value in report_data_json.items():
+            if isinstance(json_actual_key, str) and key_chinese_name in json_actual_key:
+                # 如果这个模糊匹配到的键就是我们精确查找过的键，并且精确查找时它的值是存在的但解析失败了，
+                # 那么就不需要再尝试解析同 一个无效值了。
+                # (如果精确查找时键不存在即 exact_value is None，这里仍会尝试，这是期望的行为，因为我们是基于 json_actual_key 去取 json_actual_value)
+                if json_actual_key == key_chinese_name and exact_value is not None:
+                    continue  # 之前精确匹配时已尝试过此键且值解析失败
+
+                parsed_like_value = _parse_value(json_actual_value, json_actual_key)  # 使用辅助函数解析
+                if parsed_like_value is not None:
+                    logger.debug(f"模糊匹配成功：JSON键 '{json_actual_key}' 包含目标 '{key_chinese_name}'。"
+                                 f"原始值: '{json_actual_value}', 解析后: {parsed_like_value}")
+                    return parsed_like_value
+
+        logger.debug(f"未能为 '{key_chinese_name}' 通过精确或模糊匹配找到可用值。")
+        return None
 
     def _get_total_shares(self, stock_code: str, trade_date: date) -> Optional[float]:
         """
         Calculates total shares using (成交量 / turnover) for a given date.
         Relies on a crud function to get daily market data.
+        MODIFIED: Assumes volume is in lots and 1 lot = 100 shares.
         """
-        # ASSUMED CRUD FUNCTION:
-        # def get_daily_market_data(db_session: Session, stock_code: str, trade_date: date) -> Optional[StockDailyModel]:
-        #     """Fetches StockDaily entry for a specific stock and date."""
-        #     # return db_session.query(StockDaily).filter_by(symbol=stock_code, date=trade_date).first()
-        # This function needs to be implemented in your crud.py
-        # from quant_platform.db.crud import get_daily_market_data # Example import
-        # For now, we'll use a placeholder for the call.
-
-        # Placeholder for actual crud call:
-        # daily_data_entry = crud.get_daily_market_data(self.db_session, stock_code=stock_code, trade_date=trade_date)
-        # For this example, let's assume crud.py is adapted or such a function exists:
-        from db import crud  # Assuming crud.py is in this path relative to project root
-
         daily_data_entry = None
         try:
-            # This is a conceptual call. Implement `get_daily_market_data` in your `crud.py`
-            # to query the 'stock_daily' table.
             daily_data_entry = crud.get_stock_daily_for_date(self.db_session, symbol=stock_code, trade_date=trade_date)
-        except AttributeError:
-            logger.warning(f"crud.get_stock_daily_for_date not found. Please implement it.")
+        except AttributeError:  # Should not happen if crud is imported correctly
+            logger.warning(f"crud.get_stock_daily_for_date not found. Please implement it or check import.")
+            return None  # Explicitly return None here
         except Exception as e:
             logger.error(f"Error fetching daily market data for {stock_code} on {trade_date}: {e}", exc_info=True)
-            return None
+            return None  # Explicitly return None here
 
         if daily_data_entry and hasattr(daily_data_entry, 'volume') and hasattr(daily_data_entry, 'turnover'):
             volume_in_lots = daily_data_entry.volume
             turnover_rate = daily_data_entry.turnover
 
             if volume_in_lots is not None and turnover_rate is not None and turnover_rate > 1e-9:
-                # 假设1手 = 100股
+                # 假设1手 = 100股 (根据之前的讨论，PE值过小的问题)
                 actual_volume_in_shares = volume_in_lots * 100.0
-                return actual_volume_in_shares / (turnover_rate / 100.0)
+                if actual_volume_in_shares > 0:  # Ensure shares are positive
+                    total_shares = actual_volume_in_shares / (turnover_rate / 100.0)
+                    if total_shares > 0:  # Ensure calculated total_shares is positive
+                        return total_shares
+                    else:
+                        logger.debug(
+                            f"[{stock_code}@{trade_date.isoformat()}] Calculated total shares is not positive ({total_shares}). Volume: {volume_in_lots}, Turnover: {turnover_rate}")
+                else:
+                    logger.debug(
+                        f"[{stock_code}@{trade_date.isoformat()}] Volume in lots ({volume_in_lots}) results in non-positive actual shares.")
             else:
                 logger.debug(
-                    f"[{stock_code}@{trade_date.isoformat()}] Volume or turnover rate is invalid for total shares calculation (V:{volume}, T:{turnover_rate}).")
+                    f"[{stock_code}@{trade_date.isoformat()}] Volume or turnover rate is invalid for total shares calculation (V_lots:{volume_in_lots}, T:{turnover_rate}).")
         else:
             logger.debug(
-                f"[{stock_code}@{trade_date.isoformat()}] No daily market data found or missing volume/turnover.")
+                f"[{stock_code}@{trade_date.isoformat()}] No daily market data found or missing volume/turnover fields in the fetched data.")
         return None
 
     def _fetch_financial_reports(self, stock_code: str, signal_date: date, report_type_db_key: str = 'benefit') -> Dict[
         str, Any]:
         """
-        Fetches various necessary financial reports (JSON data) up to signal_date.
-        'benefit' report_type is assumed for income statement items like profit and revenue.
-        Relies on a flexible crud function.
-
-        Returns a dictionary with keys like:
-        - 'latest_annual_for_pe': Dict (JSON data of the latest annual report)
-        - 'latest_any_for_others': Dict (JSON data of the latest report of any type)
-        - 'prev_year_same_q_for_yoy': Dict (JSON data of the report from prev year, same quarter as 'latest_any_for_others')
-        - 'annual_reports_for_3y_check': List[Dict] (JSON data of last 3-4 annual reports for 3-year profit check)
+        Fetches various necessary financial reports (JSON data) up to signal_date
+        by using crud.get_financial_reports_for_analyzer.
         """
-        fetched_reports = {
+        # 这个字典将存储最终的 JSON 数据，供分析器其他部分使用
+        fetched_reports_json_data = {
             'latest_annual_for_pe': None,
             'latest_any_for_others': None,
             'prev_year_same_q_for_yoy': None,
             'annual_reports_for_3y_check': []
         }
 
-        # ASSUMED CRUD FUNCTION:
-        # def get_financial_reports(db_session: Session, stock_code: str, report_date_lte: date,
-        #                           report_type_db_key: str, # e.g. 'benefit', 'balance', 'cashflow'
-        #                           report_period_type: Optional[str] = None, # e.g. "年报", "一季报", "中报", "三季报"
-        #                                                                    # This might map to specific month/day in report_date
-        #                           limit: Optional[int] = None,
-        #                           exact_report_year: Optional[int] = None,
-        #                           order_by_desc: List[str] = ['report_date']) -> List[StockFinancialModel]:
-        #      """Fetches StockFinancial entries. StockFinancialModel.data is the parsed JSON."""
-        # This function needs to be implemented in your crud.py.
-        # It should be flexible enough to get:
-        # 1. Latest annual report (report_date month=12, day=31, report_date_lte=signal_date, limit=1)
-        # 2. Absolute latest report of any type (report_date_lte=signal_date, limit=1, order by report_date DESC, then perhaps publish_date DESC)
-        # 3. Previous year's report of a specific type and year.
-        # 4. List of N recent annual reports.
-
-        # For now, using placeholder calls. `loader.load_multiple_financial_reports` is a good reference.
-        from db import crud  # Assuming crud.py
-        from data_processing import loader  # For adapting load_multiple_financial_reports logic
-
         try:
-            # 1. Latest Annual Report for PE (report_date is 12-31)
-            # We need a crud function that can get the latest annual report specifically.
-            # Let's assume crud.get_latest_annual_financial_report(session, stock_code, report_date_lte, report_type_db_key)
-            # Based on loader.py, we can adapt load_multiple_financial_reports's behavior
-            all_relevant_reports = loader.load_multiple_financial_reports(
-
-                symbol=stock_code,
-                report_type=report_type_db_key,
-                num_years=4,  # Fetch enough years to cover 3-year check and recent ones
-
+            # 1. 调用 crud 函数
+            # crud.py 中的参数名为 current_signal_date
+            reports_from_crud_models = crud.get_financial_reports_for_analyzer(
+                db=self.db_session,
+                stock_code=stock_code,
+                report_type_db_key=report_type_db_key,
+                current_signal_date=signal_date
             )
 
-            if not all_relevant_reports:
-                logger.warning(
-                    f"[{stock_code}@{signal_date.isoformat()}] No financial reports loaded via adapted loader logic.")
-                return fetched_reports
+            # 2. 从返回的 StockFinancial 模型对象中提取 .data (JSON)
+            latest_annual_sf_model = reports_from_crud_models.get('latest_annual_report')
+            if latest_annual_sf_model and hasattr(latest_annual_sf_model, 'data'):
+                fetched_reports_json_data['latest_annual_for_pe'] = latest_annual_sf_model.data
 
-            # Sort by report_date descending to easily get latest
-            all_relevant_reports.sort(key=lambda r: r['report_date'], reverse=True)
+            latest_quarterly_sf_model = reports_from_crud_models.get(
+                'latest_quarterly_report')  # 这对应之前的 'latest_any_for_others'
+            if latest_quarterly_sf_model and hasattr(latest_quarterly_sf_model, 'data'):
+                fetched_reports_json_data['latest_any_for_others'] = latest_quarterly_sf_model.data
 
-            # Filter reports strictly up to signal_date (loader might fetch slightly beyond based on its internal logic)
-            valid_reports = [r for r in all_relevant_reports if r['report_date'] <= signal_date]
-            if not valid_reports:
-                logger.warning(
-                    f"[{stock_code}@{signal_date.isoformat()}] No financial reports found with report_date <= signal_date.")
-                return fetched_reports
+            prev_year_sf_model = reports_from_crud_models.get('previous_year_same_quarter_report')
+            if prev_year_sf_model and hasattr(prev_year_sf_model, 'data'):
+                fetched_reports_json_data['prev_year_same_q_for_yoy'] = prev_year_sf_model.data
 
-            # Find latest annual for PE
-            for report in valid_reports:
-                if report['report_date'].month == 12 and report['report_date'].day == 31:
-                    fetched_reports['latest_annual_for_pe'] = report['data']
-                    break
+            # 处理年报列表
+            last_3_annual_sf_models_list = reports_from_crud_models.get('last_3_annual_reports', [])  # 使用 .get 提供默认空列表
+            for sf_model in last_3_annual_sf_models_list:
+                if sf_model and hasattr(sf_model, 'data'):  # 确保对象存在且有 .data 属性
+                    fetched_reports_json_data['annual_reports_for_3y_check'].append(sf_model.data)
 
-            # Find latest any type for others
-            if valid_reports:
-                fetched_reports['latest_any_for_others'] = valid_reports[0]['data']
-                latest_any_report_date = valid_reports[0]['report_date']
+            # 添加日志来确认从crud获取的数据情况
+            logger.debug(
+                f"[{stock_code}@{signal_date.isoformat()}] CRUD 函数 ({crud.get_financial_reports_for_analyzer.__name__}) 返回的报告摘要:")
+            logger.debug(
+                f"  最新年报 (用于PE): {'已找到' if fetched_reports_json_data['latest_annual_for_pe'] else '未找到'}")
+            logger.debug(
+                f"  最新季报/任何报告: {'已找到' if fetched_reports_json_data['latest_any_for_others'] else '未找到'}")
+            logger.debug(
+                f"  去年同期报告 (用于YoY): {'已找到' if fetched_reports_json_data['prev_year_same_q_for_yoy'] else '未找到'}")
+            logger.debug(
+                f"  过去3年年报数量 (用于3年盈利检查): {len(fetched_reports_json_data['annual_reports_for_3y_check'])}")
 
-                # Find previous year same quarter for YoY
-                # This requires knowing the "type" of latest_any_report_date (Q1, S1, Q3, Annual)
-                # For simplicity, if latest is Q1 YYYY, we look for Q1 YYYY-1.
-                # This logic is complex and relies on consistent report_date patterns.
-                # loader.py's load_multiple_financial_reports logic handles this by fetching a range.
-                # We search within 'valid_reports' for the corresponding previous year's report.
-                target_prev_year_date_month = latest_any_report_date.month
-                target_prev_year_date_day = latest_any_report_date.day  # Approx for quarter end
-                target_prev_year = latest_any_report_date.year - 1
-
-                for report in valid_reports:
-                    if report['report_date'].year == target_prev_year and \
-                            report['report_date'].month == target_prev_year_date_month:
-                        # Add day check if very specific, but month and year usually suffice for quarters/annual
-                        fetched_reports['prev_year_same_q_for_yoy'] = report['data']
-                        break
-
-            # Annual reports for 3-year check
-            annuals_for_check = []
-            for report in valid_reports:
-                if report['report_date'].month == 12 and report['report_date'].day == 31:
-                    annuals_for_check.append(report['data'])
-            fetched_reports['annual_reports_for_3y_check'] = annuals_for_check  # List of JSON dicts
-
-        except AttributeError:
+        except AttributeError as e:  # 例如，如果 .data 属性不存在
             logger.error(
-                f"A required crud function (e.g., for financial reports) or loader function is missing or has changed interface.")
+                f"在处理来自 crud 的报告时发生 AttributeError ({stock_code} @ {signal_date}): {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"Error fetching financial reports for {stock_code} on {signal_date}: {e}", exc_info=True)
+            logger.error(f"调用 crud.get_financial_reports_for_analyzer 时出错 ({stock_code} @ {signal_date}): {e}",
+                         exc_info=True)
+            # 在这种情况下，fetched_reports_json_data 将保持其初始的 None/空列表值
 
-        return fetched_reports
+        return fetched_reports_json_data
 
     def analyze_stock(self, stock_code: str, signal_date: date, current_price: float) -> Dict[str, Any]:
         """
@@ -266,43 +241,54 @@ class FundamentalAnalyzer:
         error_messages = []
 
         # 1. Calculate Market Cap
-        total_shares = self._get_total_shares(stock_code, signal_date)
+        total_shares = self._get_total_shares(stock_code, signal_date)  # 使用已更新的 _get_total_shares
         market_cap = np.nan
         if total_shares is not None and current_price is not None:
-            if total_shares > 0:  # Ensure total_shares is positive
+            if total_shares > 1e-9:  # Ensure total_shares is positive and non-negligible
                 market_cap = total_shares * current_price
             else:
-                error_messages.append(f"Total shares calculated as non-positive ({total_shares}).")
+                error_messages.append(f"总股本计算为非正数或过小 ({total_shares}).")
         else:
             if total_shares is None: error_messages.append(
-                "Total shares could not be calculated (missing daily volume/turnover).")
-            if current_price is None: error_messages.append("Current price not provided for market cap.")
+                "总股本无法计算 (可能缺少日成交量/换手率数据，或数据无效).")
+            if current_price is None: error_messages.append("当前价格未提供，无法计算市值.")
+
+        if pd.notna(market_cap):
+            logger.debug(
+                f"[{stock_code}@{signal_date.isoformat()}] Calculated Market Cap: {market_cap:.2f} using Total Shares: {total_shares:.2f} and Price: {current_price:.2f}")
+        else:
+            logger.debug(
+                f"[{stock_code}@{signal_date.isoformat()}] Market Cap could not be calculated. Total Shares: {total_shares}, Price: {current_price}")
 
         # 2. Fetch all necessary financial report data
-        # Use 'benefit' as the report_type_db_key based on multi_level_cross_strategy_new.py
-        # This key might need to be 'income' or similar depending on how StockFinancial.report_type is populated
-        # loader.py seems to use 'benefit' for income-statement like items.
-        financial_datas = self._fetch_financial_reports(stock_code, signal_date, report_type_db_key='benefit')
+        financial_datas = self._fetch_financial_reports(stock_code, signal_date,
+                                                        report_type_db_key='benefit')  # 使用已更新的 _fetch_financial_reports
 
         latest_annual_report_json = financial_datas['latest_annual_for_pe']
         latest_any_report_json = financial_datas['latest_any_for_others']
         prev_year_same_q_report_json = financial_datas['prev_year_same_q_for_yoy']
-        annual_reports_for_3y_list = financial_datas['annual_reports_for_3y_check']  # List of dicts
+        annual_reports_for_3y_list = financial_datas['annual_reports_for_3y_check']
 
         # 3. Calculate PE
         if pd.notna(market_cap) and latest_annual_report_json:
-            # '归属于母公司所有者的净利润' is confirmed JSON key for net profit
             net_profit_for_pe = self._safe_extract_json_value(latest_annual_report_json, NET_PROFIT_FIELD)
-            if net_profit_for_pe is not None and net_profit_for_pe > 1e-6:  # Profit must be positive and non-negligible
-                results['pe'] = round(market_cap / net_profit_for_pe, 4)
+            if net_profit_for_pe is not None and net_profit_for_pe > 1e-6:
+                results['pe'] = market_cap / net_profit_for_pe  # PE calculation
                 results['pe_lt_30'] = results['pe'] < PE_THRESHOLD
+                logger.debug(
+                    f"[{stock_code}@{signal_date.isoformat()}] PE Calculated: {results['pe']:.4f} (Market Cap: {market_cap:.2f}, Annual Profit: {net_profit_for_pe:.2f})")
             else:
                 error_messages.append(
-                    f"PE not calculated: Invalid or non-positive annual profit for PE ({net_profit_for_pe}).")
+                    f"PE计算失败：年度净利润无效或非正 ({net_profit_for_pe}).")
+                logger.debug(
+                    f"[{stock_code}@{signal_date.isoformat()}] PE not calculated: Invalid or non-positive annual profit for PE ({net_profit_for_pe}). Latest annual report JSON: {bool(latest_annual_report_json)}")
+
         else:
-            if pd.isna(market_cap): error_messages.append("PE not calculated: Market cap is NaN.")
+            if pd.isna(market_cap): error_messages.append("PE计算失败：市值是 NaN.")
             if not latest_annual_report_json: error_messages.append(
-                "PE not calculated: Latest annual report not found.")
+                "PE计算失败：未找到最新的年度报告.")
+            logger.debug(
+                f"[{stock_code}@{signal_date.isoformat()}] PE not calculated: Market cap is NaN ({pd.isna(market_cap)}), Latest annual report found ({bool(latest_annual_report_json)}).")
 
         # 4. Calculate YoY Growths and Growth Positive
         rev_growth = np.nan
@@ -313,125 +299,128 @@ class FundamentalAnalyzer:
             current_profit = self._safe_extract_json_value(latest_any_report_json, NET_PROFIT_FIELD)
             prev_profit = self._safe_extract_json_value(prev_year_same_q_report_json, NET_PROFIT_FIELD)
 
+            logger.debug(
+                f"[{stock_code}@{signal_date.isoformat()}] YoY Data: CurrRev={current_revenue}, PrevRev={prev_revenue}, CurrProf={current_profit}, PrevProf={prev_profit}")
+
             if current_revenue is not None and prev_revenue is not None:
-                if abs(prev_revenue) > 1e-6:
+                if abs(prev_revenue) > 1e-9:  # Avoid division by zero or near-zero
                     rev_growth = (current_revenue - prev_revenue) / abs(prev_revenue)
-                    results['revenue_growth_yoy'] = round(rev_growth, 4)
+                    results['revenue_growth_yoy'] = rev_growth
                 else:
-                    error_messages.append("Revenue YoY not calc: Previous revenue near zero.")
+                    error_messages.append("营收同比增长计算失败：上一期营收接近零.")
             else:
-                error_messages.append("Revenue YoY not calc: Missing current or previous revenue data.")
+                error_messages.append("营收同比增长计算失败：缺少当前或上一期营收数据.")
 
             if current_profit is not None and prev_profit is not None:
-                if abs(prev_profit) > 1e-6:
+                if abs(prev_profit) > 1e-9:  # Avoid division by zero or near-zero
                     prof_growth = (current_profit - prev_profit) / abs(prev_profit)
-                    results['profit_growth_yoy'] = round(prof_growth, 4)
-                elif current_profit > 0 and prev_profit <= 1e-6:  # From loss/zero to profit
-                    prof_growth = np.inf  # Represent as very high growth or handle as special case
-                    results['profit_growth_yoy'] = np.inf  # Store as inf
-                else:
+                    results['profit_growth_yoy'] = prof_growth
+                elif current_profit > 1e-9 and (prev_profit is None or abs(
+                        prev_profit) < 1e-9):  # Turned profitable from zero/loss or no prev data
+                    prof_growth = np.inf  # Or a very large number if np.inf is problematic for storage/JSON
+                    results['profit_growth_yoy'] = prof_growth
+                else:  # handles prev_profit is negative or other cases
                     error_messages.append(
-                        f"Profit YoY not calc: Invalid profit data (Current:{current_profit}, Prev:{prev_profit}).")
+                        f"利润同比增长计算失败：无效的利润数据 (当前:{current_profit}, 上一期:{prev_profit}).")
             else:
-                error_messages.append("Profit YoY not calc: Missing current or previous profit data.")
+                error_messages.append("利润同比增长计算失败：缺少当前或上一期利润数据.")
 
-            if pd.notna(rev_growth) and pd.notna(prof_growth) and not np.isinf(
-                    prof_growth):  # Ensure prof_growth is a finite number for this check
-                results['growth_positive'] = (rev_growth > 1e-6) and (prof_growth > 1e-6)
-            elif np.isinf(prof_growth) and prof_growth > 0 and pd.notna(
-                    rev_growth) and rev_growth > 1e-6:  # Turned profitable
-                results['growth_positive'] = True
+            if pd.notna(rev_growth) and pd.notna(prof_growth):
+                if np.isinf(prof_growth) and prof_growth > 0:  # Turned profitable
+                    results['growth_positive'] = (
+                                rev_growth > 1e-6)  # Check only revenue growth if profit turned inf positive
+                elif not np.isinf(prof_growth):  # Both are finite numbers
+                    results['growth_positive'] = (rev_growth > 1e-6) and (prof_growth > 1e-6)
+                # else case: prof_growth is -inf or NaN, growth_positive remains None
+
+            if results['growth_positive'] is not None:
+                logger.debug(
+                    f"[{stock_code}@{signal_date.isoformat()}] Growth Positive Check: RevGrowth={rev_growth:.4f}, ProfGrowth={prof_growth:.4f}, Result={results['growth_positive']}")
+
 
         else:
-            error_messages.append("YoY growths not calc: Missing current period or previous year's same period report.")
+            error_messages.append("同比增长率计算失败：缺少当期报告或去年同期报告.")
+            logger.debug(
+                f"[{stock_code}@{signal_date.isoformat()}] YoY growths not calculated: Latest any report found ({bool(latest_any_report_json)}), Prev year same Q report found ({bool(prev_year_same_q_report_json)}).")
 
         # 5. Calculate PEG-like Ratio
         current_pe_val = results.get('pe')
-        # Use finite profit_growth_yoy for PEG calculation
         finite_prof_growth_for_peg = prof_growth if pd.notna(prof_growth) and np.isfinite(prof_growth) else np.nan
 
-        if pd.notna(current_pe_val) and pd.notna(
-                finite_prof_growth_for_peg) and finite_prof_growth_for_peg > 1e-6:  # Growth rate must be positive
-            # Assuming profit_growth_yoy is a decimal (e.g., 0.25 for 25%), multiply by 100 for PEG formula
+        if pd.notna(current_pe_val) and pd.notna(finite_prof_growth_for_peg) and finite_prof_growth_for_peg > 1e-6:
             peg_like = current_pe_val / (finite_prof_growth_for_peg * 100.0)
-            results['peg_like_ratio'] = round(peg_like, 4)
+            results['peg_like_ratio'] = peg_like
             results['peg_like_lt_1'] = peg_like < PEG_LIKE_THRESHOLD
+            logger.debug(
+                f"[{stock_code}@{signal_date.isoformat()}] PEG-like Calculated: {peg_like:.4f} (PE: {current_pe_val:.4f}, Finite Profit Growth for PEG: {finite_prof_growth_for_peg:.4f})")
+
         else:
-            if pd.isna(current_pe_val): error_messages.append("PEG-like not calc: PE is NaN.")
+            if pd.isna(current_pe_val): error_messages.append("PEG近似值计算失败：PE 是 NaN.")
             if not (pd.notna(finite_prof_growth_for_peg) and finite_prof_growth_for_peg > 1e-6):
                 error_messages.append(
-                    f"PEG-like not calc: Profit growth invalid or not positive for PEG ({finite_prof_growth_for_peg}).")
+                    f"PEG近似值计算失败：利润增长率无效或非正 ({finite_prof_growth_for_peg}).")
+            logger.debug(
+                f"[{stock_code}@{signal_date.isoformat()}] PEG-like not calculated: PE is NaN ({pd.isna(current_pe_val)}), Finite profit growth for PEG ({finite_prof_growth_for_peg}).")
 
         # 6. Calculate Net Profit Positive 3 Years Latest
-        # Checks latest report + last 3 full annual reports
-        # Note: annual_reports_for_3y_list already contains relevant annual reports (desc sorted)
-        # The logic from multi_level_cross_strategy_new.py's get_fundamental_data needs careful adaptation
+        num_annual_reports_for_check = len(annual_reports_for_3y_list)
+        all_checked_profits_positive = True  # Assume true initially
 
-        profits_to_check = []
-        if latest_any_report_json:  # Include the very latest report's profit
-            latest_profit_val = self._safe_extract_json_value(latest_any_report_json, NET_PROFIT_FIELD)
-            if latest_profit_val is not None: profits_to_check.append(latest_profit_val)
-
-        # Add up to 3 most recent distinct annual profits
-        distinct_annual_profits_added = 0
-        for annual_report_json_data in annual_reports_for_3y_list:  # Assumed sorted desc by report_date
-            if distinct_annual_profits_added >= 3: break
-            profit_val = self._safe_extract_json_value(annual_report_json_data, NET_PROFIT_FIELD)
-            if profit_val is not None:
-                # This simplistic add might double count if latest_any_report_json was an annual one.
-                # A better way is to collect (date, profit) tuples then unique by date and take latest N.
-                # For now, just ensuring we have some profit values.
-                profits_to_check.append(profit_val)  # This might not be exactly 3 distinct years, but N recent reports
-                distinct_annual_profits_added += 1
-
-        if len(profits_to_check) > 0:  # Must have at least some profit data to check
-            # Check if *all* collected profits are positive. This depends on how many reports were found.
-            # Original logic: "latest + 3 years of annual reports are positive"
-            # This needs to be precise: last 3 fiscal years (12-31 reports) + latest interim report.
-            # The current 'profits_to_check' might not perfectly represent this.
-            # Let's refine: check the latest report and the last N (e.g., 3) ANNUAL reports found.
-
-            num_annual_reports_found = len(annual_reports_for_3y_list)
-            all_checked_profits_positive = True
-
-            # Check latest (any type) report if available
-            if latest_any_report_json:
-                latest_profit = self._safe_extract_json_value(latest_any_report_json, NET_PROFIT_FIELD)
-                if latest_profit is None or latest_profit <= 1e-6:
-                    all_checked_profits_positive = False
-            else:  # If no latest report, cannot confirm this part.
+        if latest_any_report_json:
+            latest_profit = self._safe_extract_json_value(latest_any_report_json, NET_PROFIT_FIELD)
+            if latest_profit is None or latest_profit <= 1e-6:
                 all_checked_profits_positive = False
-                error_messages.append("3Y Profit: Missing latest report data.")
+                logger.debug(
+                    f"[{stock_code}@{signal_date.isoformat()}] 3Y Profit Check: Latest report profit non-positive ({latest_profit}).")
+        else:
+            all_checked_profits_positive = False  # Cannot confirm if latest report is missing
+            error_messages.append("3年盈利检查失败：缺少最新的报告数据.")
+            logger.debug(
+                f"[{stock_code}@{signal_date.isoformat()}] 3Y Profit Check: Missing latest (any type) report data.")
 
-            # Check last 3 available annual reports (if all_checked_profits_positive is still true)
-            if all_checked_profits_positive:
-                if num_annual_reports_found < 3:  # Strict: require 3 full past annual reports
-                    all_checked_profits_positive = False  # Or None if unsure
-                    error_messages.append(
-                        f"3Y Profit: Insufficient annual reports found ({num_annual_reports_found}/3).")
-                else:
-                    for i in range(min(3, num_annual_reports_found)):  # Check up to 3 most recent annuals from the list
-                        annual_profit = self._safe_extract_json_value(annual_reports_for_3y_list[i], NET_PROFIT_FIELD)
-                        if annual_profit is None or annual_profit <= 1e-6:
-                            all_checked_profits_positive = False
-                            break
-
-            results[
-                'net_profit_positive_3y_latest'] = all_checked_profits_positive if num_annual_reports_found >= 3 else None  # Only True if enough data
-            if results['net_profit_positive_3y_latest'] is False:
-                error_messages.append("3Y Profit: Not all checked recent/annual profits were positive.")
+        if all_checked_profits_positive:  # Only proceed if latest profit was positive
+            if num_annual_reports_for_check < 3:  # Strict: require 3 full past annual reports from the crud function
+                # `get_financial_reports_for_analyzer` tries to get last 3, so this check is on its output
+                results['net_profit_positive_3y_latest'] = None  # Not enough data for a firm True/False
+                error_messages.append(
+                    f"3年盈利检查存疑：找到的年度报告数量不足 ({num_annual_reports_for_check}/3).")
+                logger.debug(
+                    f"[{stock_code}@{signal_date.isoformat()}] 3Y Profit Check: Insufficient annual reports found ({num_annual_reports_for_check}/3) by crud.")
+            else:
+                # Check the annual reports obtained (crud function should give up to 3 most recent relevant ones)
+                annual_profits_log = []
+                for i in range(min(3, num_annual_reports_for_check)):  # Iterate up to 3 or actual count
+                    annual_report_json_data = annual_reports_for_3y_list[i]  # crud already sorted them desc
+                    annual_profit = self._safe_extract_json_value(annual_report_json_data, NET_PROFIT_FIELD)
+                    annual_profits_log.append(annual_profit)
+                    if annual_profit is None or annual_profit <= 1e-6:
+                        all_checked_profits_positive = False
+                        break
+                results['net_profit_positive_3y_latest'] = all_checked_profits_positive
+                logger.debug(
+                    f"[{stock_code}@{signal_date.isoformat()}] 3Y Profit Check: Annual profits checked: {annual_profits_log}. Result: {results['net_profit_positive_3y_latest']}")
+        else:  # If latest profit was already non-positive or missing
+            results['net_profit_positive_3y_latest'] = False  # Cannot be true if latest is bad or missing
+            if not latest_any_report_json:  # If it was false due to missing latest report
+                logger.debug(
+                    f"[{stock_code}@{signal_date.isoformat()}] 3Y Profit Check: Set to False due to missing latest report, annuals not checked further for this flag.")
+            else:  # If it was false due to latest report profit being non-positive
+                logger.debug(
+                    f"[{stock_code}@{signal_date.isoformat()}] 3Y Profit Check: Set to False due to non-positive latest report profit, annuals not checked further for this flag.")
 
         if error_messages:
-            results['error_reason'] = "; ".join(sorted(list(set(error_messages))))
+            results['error_reason'] = "; ".join(sorted(list(set(error_messages))))  # Unique sorted errors
             logger.debug(
                 f"[{stock_code}@{signal_date.isoformat()}] Fundamental analysis errors: {results['error_reason']}")
 
         # Round relevant float results for cleaner output
         for key in ['pe', 'revenue_growth_yoy', 'profit_growth_yoy', 'peg_like_ratio']:
-            if pd.notna(results[key]) and np.isfinite(results[key]):
-                results[key] = round(results[key], 4)
-            elif np.isinf(results[key]):  # Handle infinities explicitly if they are stored
-                results[key] = str(results[key])  # e.g. "inf" or "-inf"
+            if key in results and pd.notna(results[key]):
+                if np.isinf(results[key]):
+                    results[key] = str(results[key])  # Store "inf" or "-inf" as string
+                elif np.isfinite(results[key]):
+                    results[key] = round(results[key], 4)
+                # else NaN remains NaN, which is fine for JSON (becomes null)
 
         return results
 
