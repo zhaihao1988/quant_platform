@@ -15,6 +15,7 @@ from strategies.base_strategy import BaseStrategy, StrategyResult, StrategyConte
 # 导入具体的策略类
 # (确保这些策略文件在 quant_platform/strategies/ 目录下，并且类名正确)
 from strategies.ma_pullback_strategy import AdaptedMAPullbackStrategy
+from strategies.monthly_ma_pullback_strategy import MonthlyMAPullbackStrategy
 from strategies.multi_level_cross_refactored_strategy import RefactoredMultiLevelCrossStrategy
 
 # 导入基本面分析器
@@ -24,8 +25,7 @@ from strategies.breakout_strategy import BreakoutStrategy
 from db.database import SessionLocal # 假设 SessionLocal 和 init_db
 from db import crud
 from db.models import StockList  # 用于获取股票代码和名称
-
-
+from strategies.weekly_ma_pullback_strategy import WeeklyMAPullbackStrategy
 
 # --- 日志配置 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
@@ -53,6 +53,8 @@ CONFIG = {
         AdaptedMAPullbackStrategy,
         RefactoredMultiLevelCrossStrategy,
         BreakoutStrategy,
+        WeeklyMAPullbackStrategy,
+        MonthlyMAPullbackStrategy,
     ],
     "strategy_params": {  # 可选：为特定策略传递参数
         "AdaptedMAPullbackStrategy": {
@@ -284,7 +286,14 @@ def run_screener(analysis_date_str: Optional[str] = None):
                 logger.warning(f"无法获取股票 {stock_code} 在信号日 {tech_signal.signal_date.isoformat()} 的收盘价。")
                 # 可以选择跳过此信号的基本面分析，或用None价格（会导致PE等无法计算）
                 # continue # 如果严格要求价格
-
+            # ---- 简洁的信号级别判断 ----
+            signal_level = "Daily"  # 默认
+            if tech_signal.strategy_name == "WeeklyMAPullbackStrategy":
+                signal_level = "Weekly"
+            elif tech_signal.strategy_name == "MonthlyMAPullbackStrategy":
+                signal_level = "Monthly"
+            # 如果有其他策略也需要特定级别，可以在这里添加 elif tech_signal.strategy_name == "OtherStrategyName": signal_level = "ItsLevel"
+            # ---- 修改结束 ----
             if current_close_price is None:
                 logger.warning(f"由于缺少信号日收盘价，跳过 {stock_code} 的基本面分析。")
                 # 创建一个只包含技术部分和错误信息的条目
@@ -293,7 +302,7 @@ def run_screener(analysis_date_str: Optional[str] = None):
                     "股票简称": stock_name,
                     "信号日期": tech_signal.signal_date.isoformat(),
                     "信号来源": tech_signal.strategy_name,
-                    "信号级别": tech_signal.details.get("level", "Daily"),  # MA回调策略可能没有level
+                    "信号级别": signal_level,  # MA回调策略可能没有level
                     "error_reason": "Missing closing price for fundamental analysis"
                 }
                 all_final_signals_data.append(signal_output_data)
@@ -312,7 +321,7 @@ def run_screener(analysis_date_str: Optional[str] = None):
                     "股票简称": stock_name,
                     "信号日期": tech_signal.signal_date.isoformat(),
                     "信号来源": tech_signal.strategy_name,
-                    "信号级别": tech_signal.details.get("level", "Daily"),  # MA回调策略的level可以设为"Daily"
+                    "信号级别": signal_level,  # MA回调策略的level可以设为"Daily"
                     # 添加基本面指标
                     **fundamental_metrics  # 解包字典
                 }

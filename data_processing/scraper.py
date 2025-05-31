@@ -160,20 +160,14 @@ def extract_section_from_text(text: str, section_title: str) -> Optional[str]:
     # 匹配 "第[一二三四五六七八九十]+节<空格或换行符>*章节标题"
     # 排除像目录页那样的行 "... <数字>"
     numbered_pattern = re.compile(
-        # ^\s* # 行首允许有空格
-        r'第\s*([一二三四五六七八九十]+)\s*节' # 匹配 "第 X 节" 并捕获中文数字
-        r'\s*'                 # 节 和 标题 之间允许有空格
-        rf'{re.escape(section_title)}' # 匹配章节标题
-        r'(?![^\n]*?\s*\.{3,}\s*\d+)'  # 负向前瞻：确保该行后面不像目录 (没有 ... 和页码)
-        r'\s*$',                # 标题后允许有空格直到行尾
-        re.IGNORECASE | re.MULTILINE # 忽略大小写，多行模式
+        r'第\s*([一二三四五六七八九十]+)\s*(?:节|章)'  # <--- 已修改
+        r'\s*'rf'{re.escape(section_title)}'
+        r'(?![^\n]*?\s*\.{3,}\s*\d+)'r'\s*$',
+        re.IGNORECASE | re.MULTILINE
     )
-    # 匹配不带 "第X节" 但独占一行的标题 (前后可能有空行)
-    unnumbered_pattern = re.compile(
-        r'^\s*'                 # 行首允许有空格
-        rf'{re.escape(section_title)}' # 匹配章节标题
-        r'(?![^\n]*?\s*\.{3,}\s*\d+)'  # 排除目录行
-        r'\s*$',                # 标题后允许有空格直到行尾
+    unnumbered_pattern = re.compile(  # 这个通常不变
+        r'^\s*'rf'{re.escape(section_title)}'
+        r'(?![^\n]*?\s*\.{3,}\s*\d+)'r'\s*$',
         re.IGNORECASE | re.MULTILINE
     )
 
@@ -203,11 +197,10 @@ def extract_section_from_text(text: str, section_title: str) -> Optional[str]:
         return "" # 标题找到了，但后面没内容
 
     # 3. 查找结束位置
-    end_idx = len(text) # 默认到文本末尾
-
-    # 查找下一个 "第X节" 作为结束标志
-    next_section_pattern = re.compile(r'^\s*第\s*([一二三四五六七八九十]+)\s*节', re.IGNORECASE | re.MULTILINE)
-    next_section_match = next_section_pattern.search(text, start_idx) # 从 start_idx 开始搜索
+    end_idx = len(text)
+    next_section_pattern = re.compile(r'^\s*第\s*([一二三四五六七八九十]+)\s*(?:节|章)',
+                                      re.IGNORECASE | re.MULTILINE)  # <--- 已修改
+    next_section_match = next_section_pattern.search(text, start_idx)
 
     if next_section_match:
         # 如果当前章节有编号，确保找到的下一个章节编号更大（防止错误匹配文档内的引用）

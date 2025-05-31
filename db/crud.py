@@ -1,16 +1,16 @@
-# database/crud.py
+# db/crud.py
 import logging
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import asc, text, func, extract, desc
 from typing import List, Optional, Dict, Any
 from datetime import date # <--- *** 在这里添加这一行 ***
 import pandas as pd # <--- *** 确保 pandas 也已导入，因为函数返回 Optional[pd.DataFrame] ***
-
+from sqlalchemy.exc import SQLAlchemyError
 # Use correct path for models
-from .models import StockDisclosure, StockList, StockFinancial, StockDaily, StockDisclosureChunk
+from .models import StockDisclosure, StockList, StockFinancial, StockDaily, StockDisclosureChunk, StockWeekly,StockMonthly
 # Import the centralized embedding function
 from core.vectorizer import get_embedding
-
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 logger = logging.getLogger(__name__)
 
 # Remove redundant embedding model loading from here
@@ -244,7 +244,146 @@ def get_financial_reports_for_analyzer(
         return reports
 
     return reports
-# Add other necessary CRUD operations here, e.g., for saving StockDaily, StockFinancial data if needed by other parts of the system.
-# Example:
-# def save_stock_daily_data(db: Session, data: List[Dict]): ...
-# def save_stock_financial_data(db: Session, symbol: str, report_type: str, report_date: Date, data: Dict): ...
+
+
+def bulk_upsert_stock_weekly(db: Session, weekly_data: List[Dict[str, Any]]):
+    """
+    批量插入或更新 StockWeekly 数据 (使用 PostgreSQL 的 ON CONFLICT DO UPDATE)。
+    如果基于 stock_code 和 date 的记录已存在，则更新；否则插入新记录。
+    """
+    if not weekly_data:
+        logger.info("没有周线数据需要更新/插入。")
+        return
+
+    table = StockWeekly.__table__
+    logger.info(f"准备批量 Upsert {len(weekly_data)} 条周线数据到 {table.name}...")
+
+    try:
+        # 构建 insert 语句
+        stmt = pg_insert(table).values(weekly_data)
+
+        # 定义冲突时的更新操作
+        # index_elements 指定了唯一约束的列 (在您的模型中是 'stock_code' 和 'date')
+        # set_ 中的键是要更新的列，值是使用 excluded 对象来引用导致冲突的待插入数据的值
+        update_dict = {
+            col.name: getattr(stmt.excluded, col.name)
+            for col in table.c  # table.c 包含了表的所有列对象
+            if col.name not in ['id', 'stock_code', 'date']  # 不更新主键和唯一约束键本身
+        }
+
+        if not update_dict:
+            # 如果除了唯一键和主键外没有其他列了（不太可能，但作为保险）
+            # 或者您明确只想插入不想更新已存在的，可以使用 on_conflict_do_nothing()
+            # on_conflict_stmt = stmt.on_conflict_do_nothing(index_elements=['stock_code', 'date'])
+            logger.warning(f"表 {table.name} 除了唯一键外没有其他列可更新，将仅尝试插入。")
+            # 如果确实是这种情况，可能需要调整模型或这里的逻辑
+            # 为了安全，我们还是执行一个空的更新，或者可以改成 do_nothing
+            on_conflict_stmt = stmt.on_conflict_do_update(
+                index_elements=['stock_code', 'date'],
+                set_={}  # 空更新，效果类似 DO NOTHING 但会返回影响行数
+            )
+        else:
+            on_conflict_stmt = stmt.on_conflict_do_update(
+                index_elements=['stock_code', 'date'],  # 确保这些列上有唯一索引
+                set_=update_dict
+            )
+
+        db.execute(on_conflict_stmt)
+        db.commit()
+        logger.info(f"StockWeekly 批量 Upsert 操作完成。")
+
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"批量 Upsert StockWeekly 数据失败: {e}", exc_info=True)
+    except Exception as e:  # 捕获其他潜在错误
+        db.rollback()
+        logger.error(f"StockWeekly 批量 Upsert 发生未知错误: {e}", exc_info=True)
+def get_latest_stock_weekly_date(db: Session, stock_code: str) -> Optional[date]:
+    """获取某支股票在 StockWeekly 表中最新的日期"""
+    try:
+        latest_date = db.query(func.max(StockWeekly.date)).filter(StockWeekly.stock_code == stock_code).scalar()
+        return latest_date
+    except Exception as e:
+        logger.error(f"获取 StockWeekly 最新日期失败 (stock_code={stock_code}): {e}", exc_info=True)
+        return None
+
+# --- CRUD for StockMonthly (与 StockWeekly 非常类似) ---
+
+def bulk_upsert_stock_monthly(db: Session, monthly_data: List[Dict[str, Any]]):
+    """
+    批量插入或更新 StockMonthly 数据 (使用 PostgreSQL 的 ON CONFLICT DO UPDATE)。
+    """
+    if not monthly_data:
+        logger.info("没有月线数据需要更新/插入。")
+        return
+
+    table = StockMonthly.__table__
+    logger.info(f"准备批量 Upsert {len(monthly_data)} 条月线数据到 {table.name}...")
+
+    try:
+        stmt = pg_insert(table).values(monthly_data)
+
+        update_dict = {
+            col.name: getattr(stmt.excluded, col.name)
+            for col in table.c
+            if col.name not in ['id', 'stock_code', 'date']
+        }
+
+        if not update_dict:
+            logger.warning(f"表 {table.name} 除了唯一键外没有其他列可更新，将仅尝试插入。")
+            on_conflict_stmt = stmt.on_conflict_do_update(
+                index_elements=['stock_code', 'date'],
+                set_={}
+            )
+        else:
+            on_conflict_stmt = stmt.on_conflict_do_update(
+                index_elements=['stock_code', 'date'],  # 确保这些列上有唯一索引
+                set_=update_dict
+            )
+
+        db.execute(on_conflict_stmt)
+        db.commit()
+        logger.info(f"StockMonthly 批量 Upsert 操作完成。")
+
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"批量 Upsert StockMonthly 数据失败: {e}", exc_info=True)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"StockMonthly 批量 Upsert 发生未知错误: {e}", exc_info=True)
+
+def get_stock_monthly_data(db: Session, stock_code: str, start_date: Optional[date] = None, end_date: Optional[date] = None, tail_limit: Optional[int] = None) -> Optional[pd.DataFrame]:
+    """
+    获取指定股票的月线数据。
+    """
+    logger.debug(f"查询 StockMonthly: stock_code={stock_code}, start={start_date}, end={end_date}, limit={tail_limit}")
+    try:
+        query = db.query(StockMonthly).filter(StockMonthly.stock_code == stock_code)
+        if start_date:
+            query = query.filter(StockMonthly.date >= start_date)
+        if end_date:
+            query = query.filter(StockMonthly.date <= end_date)
+
+        if tail_limit is not None:
+            query = query.order_by(desc(StockMonthly.date)).limit(tail_limit)
+            df = pd.read_sql_query(query.statement, db.bind, parse_dates=["date"])
+            if not df.empty:
+                return df.iloc[::-1].reset_index(drop=True) # 保持时间升序
+            return df # 返回空DataFrame
+        else:
+            query = query.order_by(asc(StockMonthly.date))
+            df = pd.read_sql_query(query.statement, db.bind, parse_dates=["date"])
+            return df
+
+    except Exception as e:
+        logger.error(f"获取 StockMonthly 数据失败 (stock_code={stock_code}): {e}", exc_info=True)
+        return None
+
+def get_latest_stock_monthly_date(db: Session, stock_code: str) -> Optional[date]:
+    """获取某支股票在 StockMonthly 表中最新的日期"""
+    try:
+        latest_date = db.query(func.max(StockMonthly.date)).filter(StockMonthly.stock_code == stock_code).scalar()
+        return latest_date
+    except Exception as e:
+        logger.error(f"获取 StockMonthly 最新日期失败 (stock_code={stock_code}): {e}", exc_info=True)
+        return None

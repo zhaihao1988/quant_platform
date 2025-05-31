@@ -1,6 +1,6 @@
 # database/models.py
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, Integer, String, Float, Date, Text, JSON, ForeignKey  # Added JSON for financial data
+from sqlalchemy import Column, Integer, String, Float, Date, Text, JSON, ForeignKey, Index   # Added JSON for financial data
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.orm import relationship
 
@@ -77,3 +77,48 @@ class StockDisclosure(Base):
     raw_content = Column(Text, nullable=True)
     # Use dimension from settings
     #content_vector = Column(Vector(settings.EMBEDDING_DIM), nullable=True)
+
+
+class StockWeekly(Base):
+    __tablename__ = "stock_weekly"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_code = Column(String(10), ForeignKey('stock_list.code'), nullable=False, index=True)  # 股票代码
+    date = Column(Date, nullable=False, index=True)  # 周的结束日期 (例如，周五)
+
+    open = Column(Float, nullable=True)
+    high = Column(Float, nullable=True)
+    low = Column(Float, nullable=True)
+    close = Column(Float, nullable=True)
+    volume = Column(Float, nullable=True)  # 成交量，根据您的数据源可能是Integer或Float
+    turnover = Column(Float, nullable=True)  # 成交额，字段名与 StockDaily 一致
+    # 如果需要，可以从 StockDaily 的 pct_change 计算周涨跌幅
+    # pct_chg = Column(Float, nullable=True) # 周涨跌幅
+
+    # 联合唯一约束，确保每个股票每周只有一条记录
+    __table_args__ = (
+        Index('idx_stock_weekly_stock_date', 'stock_code', 'date', unique=True),
+    )
+    # 可选: 如果需要从 StockWeekly 反向查询 StockList
+    # stock = relationship("StockList", back_populates="weekly_data") # 假设 StockList 中有 weekly_data 关系
+
+
+class StockMonthly(Base):
+    __tablename__ = "stock_monthly"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_code = Column(String(10), ForeignKey('stock_list.code'), nullable=False, index=True)  # 股票代码
+    date = Column(Date, nullable=False, index=True)  # 月的结束日期 (例如，月末最后一个交易日)
+
+    open = Column(Float, nullable=True)
+    high = Column(Float, nullable=True)
+    low = Column(Float, nullable=True)
+    close = Column(Float, nullable=True)
+    volume = Column(Float, nullable=True)  # 成交量
+    turnover = Column(Float, nullable=True)  # 成交额
+    # pct_chg = Column(Float, nullable=True) # 月涨跌幅
+
+    # 联合唯一约束
+    __table_args__ = (
+        Index('idx_stock_monthly_stock_date', 'stock_code', 'date', unique=True),
+    )
+    # 可选: 如果需要从 StockMonthly 反向查询 StockList
+    # stock = relationship("StockList", back_populates="monthly_data") # 假设 StockList 中有 monthly_data 关系
