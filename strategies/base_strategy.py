@@ -23,13 +23,13 @@ class StrategyResult:
     """
     策略信号的标准化输出格式。
     """
-    stock_code: str                                 # 股票代码
+    symbol: str                                 # 股票代码
     signal_date: date                               # 信号产生的日期
     strategy_name: str                              # 产生信号的策略名称
     signal_type: str = "BUY"                        # 信号类型 (e.g., "BUY", "SELL", "HOLD")
     signal_score: Optional[float] = None            # 信号评分 (可选)
     details: Dict[str, Any] = field(default_factory=dict) # 包含策略特定信息的字典 (例如，信号级别、关键指标值等)
-
+    notes: Optional[str] = None
 class BaseStrategy(ABC):
     """
     多策略系统中策略的抽象基类。
@@ -45,7 +45,7 @@ class BaseStrategy(ABC):
         """策略的唯一名称。"""
         pass
 
-    def preload_data(self, stock_codes: List[str]) -> Dict[str, Dict[str, pd.DataFrame]]:
+    def preload_data(self, symbols: List[str]) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
         可选的预加载数据方法。
         如果策略执行器 (如 multi_strategy_screener.py) 负责数据加载，
@@ -57,12 +57,12 @@ class BaseStrategy(ABC):
         return {}
 
     @abstractmethod
-    def run_for_stock(self, stock_code: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[StrategyResult]:
+    def run_for_stock(self, symbol: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[StrategyResult]:
         """
         为单个股票在指定的当前日期执行策略逻辑。
 
         参数:
-        - stock_code (str): 股票代码。
+        - symbol (str): 股票代码。
         - current_date (date): 当前分析的日期。策略应基于此日期的数据判断是否产生信号。
         - data (Dict[str, pd.DataFrame]): 一个字典，包含该股票所需时间周期的数据。
           键是时间周期 (例如 "daily", "weekly", "monthly")，值是对应的Pandas DataFrame。

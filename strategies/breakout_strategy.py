@@ -30,7 +30,7 @@ except ImportError:
 
     @dataclass
     class StrategyResult:
-        stock_code: str
+        symbol: str
         signal_date: date
         strategy_name: str
         signal_type: str = "BUY"
@@ -39,7 +39,7 @@ except ImportError:
 
         def __str__(self):
             details_str = ", ".join([f"{k}: {v}" for k, v in self.details.items()])
-            return (f"StrategyResult(stock_code='{self.stock_code}', signal_date='{self.signal_date}', "
+            return (f"StrategyResult(symbol='{self.symbol}', signal_date='{self.signal_date}', "
                     f"strategy_name='{self.strategy_name}', signal_type='{self.signal_type}', details={{{details_str}}})")
 
 
@@ -54,7 +54,7 @@ except ImportError:
         def strategy_name(self) -> str: pass
 
         @abstractmethod
-        def run_for_stock(self, stock_code: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[
+        def run_for_stock(self, symbol: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[
             StrategyResult]: pass
 
 
@@ -290,13 +290,13 @@ class BreakoutStrategy(BaseStrategy):
                 # else: it's the last stroke and an upstroke, so not completed by this definition
         return sorted(completed_upstrokes, key=lambda s: s.end_fractal.kline.dt, reverse=True)
 
-    def run_for_stock(self, stock_code: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[StrategyResult]:
+    def run_for_stock(self, symbol: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[StrategyResult]:
         self._initialize_state_for_stock()
         results: List[StrategyResult] = []
 
         daily_df_orig = data.get("daily")
         if daily_df_orig is None or daily_df_orig.empty or 'date' not in daily_df_orig.columns:
-            logger.warning(f"[{self.strategy_name}@{stock_code}@{current_date.isoformat()}] No daily data.");
+            logger.warning(f"[{self.strategy_name}@{symbol}@{current_date.isoformat()}] No daily data.");
             return results
 
         daily_df = daily_df_orig.copy()
@@ -310,7 +310,7 @@ class BreakoutStrategy(BaseStrategy):
 
         df_full_history_for_analysis = daily_df[daily_df['date'] <= current_date].copy()
         if len(df_full_history_for_analysis) < 2:  # Need at least current and previous bar
-            logger.info(f"[{self.strategy_name}@{stock_code}@{current_date.isoformat()}] Not enough data ( < 2 bars).");
+            logger.info(f"[{self.strategy_name}@{symbol}@{current_date.isoformat()}] Not enough data ( < 2 bars).");
             return results
 
         df_full_history_for_analysis = self._calculate_volume_ma(df_full_history_for_analysis)
@@ -332,7 +332,7 @@ class BreakoutStrategy(BaseStrategy):
 
         if len(df_slice_for_patterns) < (
                 self.params['fractal_definition_lookback'] * 2 + self.params['min_bars_between_fractals_bt'] + 3):
-            logger.debug(f"[{self.strategy_name}@{stock_code}] Not enough data in slice for pattern id.");
+            logger.debug(f"[{self.strategy_name}@{symbol}] Not enough data in slice for pattern id.");
             return results
 
         raw_klines = self._df_to_raw_klines(df_slice_for_patterns)  # Use the slice for K-line conversion
@@ -345,7 +345,7 @@ class BreakoutStrategy(BaseStrategy):
                 self._fractals = self._identify_fractals_batch()
                 if len(self._fractals) >= 2: self._strokes = self._connect_fractals_to_strokes_batch()
 
-        if not self._strokes: logger.debug(f"[{self.strategy_name}@{stock_code}] No strokes."); return results
+        if not self._strokes: logger.debug(f"[{self.strategy_name}@{symbol}] No strokes."); return results
 
         # 2. 寻找H1, H2, H3 (H3 > H2 > H1, H1 is latest)
         h_points_found: List[H_Point] = []
@@ -379,11 +379,11 @@ class BreakoutStrategy(BaseStrategy):
         # Structure Check: Must have H3 > H2 > H1
         if not (h3 and h2 and h1 and h3.price > h2.price > h1.price):
             logger.debug(
-                f"[{self.strategy_name}@{stock_code}] Did not find the required H3>H2>H1 structure. H1:{h1}, H2:{h2}, H3:{h3}")
+                f"[{self.strategy_name}@{symbol}] Did not find the required H3>H2>H1 structure. H1:{h1}, H2:{h2}, H3:{h3}")
             return results
 
         logger.debug(
-            f"[{self.strategy_name}@{stock_code}] Found structure H3({h3.price:.2f}@{h3.date}) > H2({h2.price:.2f}@{h2.date}) > H1({h1.price:.2f}@{h1.date})")
+            f"[{self.strategy_name}@{symbol}] Found structure H3({h3.price:.2f}@{h3.date}) > H2({h2.price:.2f}@{h2.date}) > H1({h1.price:.2f}@{h1.date})")
 
         potential_breakout_targets: List[H_Point] = []
         if h3: potential_breakout_targets.append(h3)
@@ -404,14 +404,14 @@ class BreakoutStrategy(BaseStrategy):
                 ]
             if df_after_h.empty:
                 logger.debug(
-                    f"[{self.strategy_name}@{stock_code}] No data after {level_name} ({h_date}) for pullback check.");
+                    f"[{self.strategy_name}@{symbol}] No data after {level_name} ({h_date}) for pullback check.");
                 continue
 
             min_low_since_h = df_after_h['low'].min()
             required_pullback_price = h_price * (1 - self.params['pullback_depth_pct'])
             if not (min_low_since_h <= required_pullback_price):
                 logger.debug(
-                    f"[{self.strategy_name}@{stock_code}] Pullback for {level_name}({h_price:.2f}) not met. MinLow={min_low_since_h:.2f}, Req<={required_pullback_price:.2f}");
+                    f"[{self.strategy_name}@{symbol}] Pullback for {level_name}({h_price:.2f}) not met. MinLow={min_low_since_h:.2f}, Req<={required_pullback_price:.2f}");
                 continue
 
             # B. 股价位置限制
@@ -422,10 +422,10 @@ class BreakoutStrategy(BaseStrategy):
             if min_low_past_3_years is not None:
                 if current_high_price > min_low_past_3_years * self.params['max_price_vs_3year_low_ratio']:
                     logger.debug(
-                        f"[{self.strategy_name}@{stock_code}] Price position limit exceeded for {level_name}. CurrHigh {current_high_price:.2f} vs Limit {min_low_past_3_years * self.params['max_price_vs_3year_low_ratio']:.2f}");
+                        f"[{self.strategy_name}@{symbol}] Price position limit exceeded for {level_name}. CurrHigh {current_high_price:.2f} vs Limit {min_low_past_3_years * self.params['max_price_vs_3year_low_ratio']:.2f}");
                     continue
             else:
-                logger.warning(f"[{self.strategy_name}@{stock_code}] Could not check 3-year low for {level_name}.")
+                logger.warning(f"[{self.strategy_name}@{symbol}] Could not check 3-year low for {level_name}.")
 
             # C. 突破确认
             cond_c_prev_high_below_h = previous_high_price < h_price
@@ -433,16 +433,16 @@ class BreakoutStrategy(BaseStrategy):
             breakthrough_cond_met = cond_c_prev_high_below_h and cond_c_curr_high_above_h
             if not breakthrough_cond_met:
                 logger.debug(
-                    f"[{self.strategy_name}@{stock_code}] Breakout for {level_name}({h_price:.2f}) not met: PrevHighOK={cond_c_prev_high_below_h}, CurrHighOK={cond_c_curr_high_above_h}");
+                    f"[{self.strategy_name}@{symbol}] Breakout for {level_name}({h_price:.2f}) not met: PrevHighOK={cond_c_prev_high_below_h}, CurrHighOK={cond_c_curr_high_above_h}");
                 continue
 
             # D. 成交量确认
             if pd.isna(current_ma_volume) or current_ma_volume == 0:
-                logger.debug(f"[{self.strategy_name}@{stock_code}] Volume MA NaN/Zero for {level_name}.");
+                logger.debug(f"[{self.strategy_name}@{symbol}] Volume MA NaN/Zero for {level_name}.");
                 continue
             if not (current_volume > current_ma_volume * self.params['volume_ratio_threshold']):
                 logger.debug(
-                    f"[{self.strategy_name}@{stock_code}] Volume for {level_name} not met. CurrVol={current_volume} vs Thr={current_ma_volume * self.params['volume_ratio_threshold']:.0f}");
+                    f"[{self.strategy_name}@{symbol}] Volume for {level_name} not met. CurrVol={current_volume} vs Thr={current_ma_volume * self.params['volume_ratio_threshold']:.0f}");
                 continue
 
             # All conditions met for this H_target
@@ -460,9 +460,9 @@ class BreakoutStrategy(BaseStrategy):
                 "h2_detail": f"{h2.price:.2f}@{h2.date.isoformat()}" if h2 else "N/A",
                 "h3_detail": f"{h3.price:.2f}@{h3.date.isoformat()}" if h3 else "N/A",
             }
-            results.append(StrategyResult(stock_code, current_date, self.strategy_name, "BUY", details=signal_details))
+            results.append(StrategyResult(symbol, current_date, self.strategy_name, "BUY", details=signal_details))
             logger.info(
-                f"[{self.strategy_name}@{stock_code}@{current_date.isoformat()}] BUY SIGNAL (Breakout {level_name}). Details: {signal_details}")
+                f"[{self.strategy_name}@{symbol}@{current_date.isoformat()}] BUY SIGNAL (Breakout {level_name}). Details: {signal_details}")
             return results  # Crucial: Only generate signal for the highest level broken
 
         return results
@@ -504,7 +504,7 @@ if __name__ == "__main__":
         test_logger.info(f"Strategy params for {strategy_instance.strategy_name}: {strategy_instance.params}")
         test_logger.info(
             f"Running strategy {strategy_instance.strategy_name} for {stock_to_test} on {target_date.isoformat()}...")
-        signals = strategy_instance.run_for_stock(stock_code=stock_to_test, current_date=target_date,
+        signals = strategy_instance.run_for_stock(symbol=stock_to_test, current_date=target_date,
                                                   data=data_for_strategy)
         if signals:
             test_logger.info(f"--- Signals for {stock_to_test} on {target_date.isoformat()} ---")

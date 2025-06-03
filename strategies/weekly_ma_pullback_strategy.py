@@ -28,7 +28,7 @@ except ImportError:
 
     @dataclass
     class StrategyResult:
-        stock_code: str;
+        symbol: str;
         signal_date: date;
         strategy_name: str
         signal_type: str = "BUY";
@@ -39,7 +39,7 @@ except ImportError:
         def __str__(self):
             details_str = ", ".join([f"{k}: {v}" for k, v in self.details.items()])
             tf_str = f", timeframe='{self.timeframe}'" if self.timeframe else ""
-            return (f"StrategyResult(stock_code='{self.stock_code}', signal_date='{self.signal_date}', "
+            return (f"StrategyResult(symbol='{self.symbol}', signal_date='{self.signal_date}', "
                     f"strategy_name='{self.strategy_name}', signal_type='{self.signal_type}'{tf_str}, details={{{details_str}}})")
 
 
@@ -49,7 +49,7 @@ except ImportError:
         @property
         def strategy_name(self) -> str: raise NotImplementedError
 
-        def run_for_stock(self, stock_code: str, current_eval_date: date, data: Dict[str, pd.DataFrame]) -> List[
+        def run_for_stock(self, symbol: str, current_eval_date: date, data: Dict[str, pd.DataFrame]) -> List[
             StrategyResult]: raise NotImplementedError
 
 # --- 缠论相关数据结构 (保持不变) ---
@@ -367,13 +367,13 @@ class WeeklyMAPullbackStrategy(BaseStrategy):
                                              qrh_candidate_original_idx: int,
                                              current_eval_date: date,
                                              df_weekly_history_with_mas: pd.DataFrame,
-                                             stock_code: str) -> tuple[bool, Optional[str]]:
+                                             symbol: str) -> tuple[bool, Optional[str]]:
         """检查一个给定的QRH候选从其形成后到当前评估日之间是否已失效"""
         try:
             qrh_loc_in_history = df_weekly_history_with_mas.index.get_loc(qrh_candidate_original_idx)
         except KeyError:
             logger.error(
-                f"[{self.strategy_name}@{stock_code}] 在检查失效时, QRH候选 original_idx ({qrh_candidate_original_idx}) 在周线历史中未找到。")
+                f"[{self.strategy_name}@{symbol}] 在检查失效时, QRH候选 original_idx ({qrh_candidate_original_idx}) 在周线历史中未找到。")
             return True, "QRH index not found in history"
 
         df_to_check_invalidation = df_weekly_history_with_mas[
@@ -418,10 +418,10 @@ class WeeklyMAPullbackStrategy(BaseStrategy):
                                       potential_peak_candidates: List[ActivePeakCandidateInfoW],
                                       df_weekly_history_with_mas: pd.DataFrame,
                                       current_eval_date: date,
-                                      stock_code: str) -> Optional[QualifiedRefHighInfoW]:
+                                      symbol: str) -> Optional[QualifiedRefHighInfoW]:
         valid_qrhs: List[QualifiedRefHighInfoW] = []
         logger.debug(
-            f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 开始从 {len(potential_peak_candidates)} 个初步候选者中筛选有效QRH-W。")
+            f"[{self.strategy_name}@{symbol}@{current_eval_date}] 开始从 {len(potential_peak_candidates)} 个初步候选者中筛选有效QRH-W。")
 
         for candidate in potential_peak_candidates:
             try:
@@ -450,7 +450,7 @@ class WeeklyMAPullbackStrategy(BaseStrategy):
             has_invalidated, invalidation_reason = self._check_if_qrh_has_invalidated_weekly(
                 qrh_candidate_date=candidate.date, qrh_candidate_original_idx=candidate.original_idx,
                 current_eval_date=current_eval_date, df_weekly_history_with_mas=df_weekly_history_with_mas,
-                stock_code=stock_code)
+                symbol=symbol)
             if has_invalidated:
                 logger.debug(f"  候选QRH-W {candidate.date} Px:{candidate.price:.2f} 已于 {invalidation_reason} 失效。")
                 continue
@@ -464,15 +464,15 @@ class WeeklyMAPullbackStrategy(BaseStrategy):
             logger.debug(
                 f"  候选QRH-W {candidate.date} Px:{candidate.price:.2f} (GainRatio:{gain_ratio_str}) 验证通过且至今未失效。")
         if not valid_qrhs:
-            logger.info(f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 未找到任何有效的、未失效的QRH-W。")
+            logger.info(f"[{self.strategy_name}@{symbol}@{current_eval_date}] 未找到任何有效的、未失效的QRH-W。")
             return None
 
         highest_valid_qrh = max(valid_qrhs, key=lambda q: q.price)
         logger.info(
-            f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 选择的最终有效QRH-W: {highest_valid_qrh.price:.2f} @ {highest_valid_qrh.date}")
+            f"[{self.strategy_name}@{symbol}@{current_eval_date}] 选择的最终有效QRH-W: {highest_valid_qrh.price:.2f} @ {highest_valid_qrh.date}")
         return highest_valid_qrh
 
-    def run_for_stock(self, stock_code: str, current_eval_date: date, data: Dict[str, pd.DataFrame]) -> List[
+    def run_for_stock(self, symbol: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[
         StrategyResult]:
         self._initialize_internal_states()
         results: List[StrategyResult] = []
@@ -482,7 +482,7 @@ class WeeklyMAPullbackStrategy(BaseStrategy):
 
         if df_weekly_orig is None or df_weekly_orig.empty: return results
 
-        df_weekly_history = df_weekly_orig[df_weekly_orig['date'] <= current_eval_date].copy()
+        df_weekly_history = df_weekly_orig[df_weekly_orig['date'] <= current_date].copy()
 
         min_len_req = max(self.params['weekly_ma_long'], self.params['weekly_ma_peak_qualify_period'],
                           self.params['weekly_peak_recent_gain_periods'],
@@ -491,7 +491,7 @@ class WeeklyMAPullbackStrategy(BaseStrategy):
 
         df_weekly_history = self._calculate_weekly_mas(df_weekly_history)
 
-        current_bar_w_rows = df_weekly_history[df_weekly_history['date'] == current_eval_date]
+        current_bar_w_rows = df_weekly_history[df_weekly_history['date'] == current_date]
         if current_bar_w_rows.empty: return results
         current_bar_w = current_bar_w_rows.iloc[0]
         current_bar_w_iloc = df_weekly_history.index.get_loc(current_bar_w.name)
@@ -499,13 +499,13 @@ class WeeklyMAPullbackStrategy(BaseStrategy):
         # 月线数据处理
         df_monthly_history = pd.DataFrame()  # 初始化为空
         if df_monthly_orig is not None and not df_monthly_orig.empty:
-            df_monthly_history = df_monthly_orig[df_monthly_orig['date'] <= current_eval_date].copy()
+            df_monthly_history = df_monthly_orig[df_monthly_orig['date'] <= current_date].copy()
             if not df_monthly_history.empty and len(df_monthly_history) >= self.params['monthly_ma_filter_period']:
                 df_monthly_history = self._calculate_monthly_mas(df_monthly_history)
             elif not df_monthly_history.empty:  # 月线数据有，但不足以计算MA
                 df_monthly_history[self.ma_monthly_filter_col_m] = np.nan
                 logger.info(
-                    f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 月线历史数据不足以计算{self.params['monthly_ma_filter_period']}MA，月线过滤可能不准确。")
+                    f"[{self.strategy_name}@{symbol}@{current_date}] 月线历史数据不足以计算{self.params['monthly_ma_filter_period']}MA，月线过滤可能不准确。")
             # else: df_monthly_history 保持空
         if df_monthly_history.empty:  # 确保即使月线数据为空，列也存在以避免后续KeyError
             df_monthly_history = pd.DataFrame(columns=['date', self.ma_monthly_filter_col_m])
@@ -536,7 +536,7 @@ class WeeklyMAPullbackStrategy(BaseStrategy):
 
         potential_peaks_w = self._get_potential_peak_candidates_weekly(current_bar_w, df_weekly_history)
         self._qualified_ref_high_w = self._get_highest_valid_qrh_weekly(
-            potential_peaks_w, df_weekly_history, current_eval_date, stock_code)
+            potential_peaks_w, df_weekly_history, current_date, symbol)
 
         if self._qualified_ref_high_w:
             qrh_w = self._qualified_ref_high_w
@@ -574,14 +574,14 @@ class WeeklyMAPullbackStrategy(BaseStrategy):
                 if pd.notna(ma30m_prev_val): ma30m_rising_flat = (round(ma30m_val, 2) >= round(ma30m_prev_val, 2))
                 cond_w5 = price_above_ma30m and ma30m_rising_flat
             elif current_bar_m.empty:
-                logger.debug(f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 月线数据为空，W5条件不满足。")
+                logger.debug(f"[{self.strategy_name}@{symbol}@{current_date}] 月线数据为空，W5条件不满足。")
             elif not pd.notna(ma30m_val):
-                logger.debug(f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 月线MA30为空，W5条件不满足。")
+                logger.debug(f"[{self.strategy_name}@{symbol}@{current_date}] 月线MA30为空，W5条件不满足。")
 
             ma30w_str = f"{ma30w_val:.2f}" if pd.notna(ma30w_val) else "N/A"
             ma30m_str = f"{ma30m_val:.2f}" if pd.notna(ma30m_val) else "N/A"
             logger.debug(
-                f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 周线信号条件评估 (QRH: {qrh_w.price:.2f}@{qrh_w.date}): "
+                f"[{self.strategy_name}@{symbol}@{current_date}] 周线信号条件评估 (QRH: {qrh_w.price:.2f}@{qrh_w.date}): "
                 f"W1:{cond_w1}, W2:{cond_w2} (Low:{cw_low:.2f}, MA30W:{ma30w_str}), "
                 f"W3:{cond_w3}, W4:{cond_w4}, W5:{cond_w5} (W.Close:{cw_close:.2f}, MA30M:{ma30m_str})")
 
@@ -594,11 +594,11 @@ class WeeklyMAPullbackStrategy(BaseStrategy):
                     self.ma_monthly_filter_col_m: ma30m_str,
                     "conditions_met": {"W1": cond_w1, "W2": cond_w2, "W3": cond_w3, "W4": cond_w4, "W5": cond_w5}
                 }
-                results.append(StrategyResult(stock_code, current_eval_date, self.strategy_name, details=details,
+                results.append(StrategyResult(symbol, current_date, self.strategy_name, details=details,
                                               timeframe="weekly"))
-                logger.info(f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 周线级别买入信号产生！")
+                logger.info(f"[{self.strategy_name}@{symbol}@{current_date}] 周线级别买入信号产生！")
         else:
-            logger.debug(f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 无有效QRH-W，不产生信号。")
+            logger.debug(f"[{self.strategy_name}@{symbol}@{current_date}] 无有效QRH-W，不产生信号。")
         return results
 
 

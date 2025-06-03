@@ -28,7 +28,7 @@ except ImportError:
 
     @dataclass
     class StrategyResult:
-        stock_code: str;
+        symbol: str;
         signal_date: date;
         strategy_name: str
         signal_type: str = "BUY";
@@ -39,7 +39,7 @@ except ImportError:
         def __str__(self):
             details_str = ", ".join([f"{k}: {v}" for k, v in self.details.items()])
             tf_str = f", timeframe='{self.timeframe}'" if self.timeframe else ""
-            return (f"StrategyResult(stock_code='{self.stock_code}', signal_date='{self.signal_date}', "
+            return (f"StrategyResult(symbol='{self.symbol}', signal_date='{self.signal_date}', "
                     f"strategy_name='{self.strategy_name}', signal_type='{self.signal_type}'{tf_str}, details={{{details_str}}})")
 
 
@@ -49,7 +49,7 @@ except ImportError:
         @property
         def strategy_name(self) -> str: raise NotImplementedError
 
-        def run_for_stock(self, stock_code: str, current_eval_date: date, data: Dict[str, pd.DataFrame]) -> List[
+        def run_for_stock(self, symbol: str, current_eval_date: date, data: Dict[str, pd.DataFrame]) -> List[
             StrategyResult]: raise NotImplementedError
 
 # --- 缠论相关数据结构 ---
@@ -163,13 +163,13 @@ class MonthlyMAPullbackStrategy(BaseStrategy):
                                               qrh_candidate_original_idx: int,
                                               current_eval_date: date,
                                               df_monthly_history_with_mas: pd.DataFrame,
-                                              stock_code: str) -> tuple[bool, Optional[str]]:
+                                              symbol: str) -> tuple[bool, Optional[str]]:
         """检查一个给定的QRH候选从其形成后到当前评估日之间是否已失效"""
         try:
             qrh_loc_in_history = df_monthly_history_with_mas.index.get_loc(qrh_candidate_original_idx)
         except KeyError:
             logger.error(
-                f"[{self.strategy_name}@{stock_code}] 在检查失效时, QRH候选 original_idx ({qrh_candidate_original_idx}) 在历史中未找到。")
+                f"[{self.strategy_name}@{symbol}] 在检查失效时, QRH候选 original_idx ({qrh_candidate_original_idx}) 在历史中未找到。")
             return True, "QRH index not found in history"
 
         df_to_check_invalidation = df_monthly_history_with_mas[
@@ -214,10 +214,10 @@ class MonthlyMAPullbackStrategy(BaseStrategy):
                                        potential_peak_candidates: List[ActivePeakCandidateInfoM],
                                        df_monthly_history_with_mas: pd.DataFrame,
                                        current_eval_date: date,
-                                       stock_code: str) -> Optional[QualifiedRefHighInfoM]:
+                                       symbol: str) -> Optional[QualifiedRefHighInfoM]:
         valid_qrhs: List[QualifiedRefHighInfoM] = []
         logger.debug(
-            f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 开始从 {len(potential_peak_candidates)} 个初步候选者中筛选有效QRH-M。")
+            f"[{self.strategy_name}@{symbol}@{current_eval_date}] 开始从 {len(potential_peak_candidates)} 个初步候选者中筛选有效QRH-M。")
 
         for candidate in potential_peak_candidates:
             # 1. 验证近期涨幅
@@ -253,7 +253,7 @@ class MonthlyMAPullbackStrategy(BaseStrategy):
                 qrh_candidate_original_idx=candidate.original_idx,
                 current_eval_date=current_eval_date,  # 传递当前评估日
                 df_monthly_history_with_mas=df_monthly_history_with_mas,
-                stock_code=stock_code
+                symbol=symbol
             )
 
             if has_invalidated:
@@ -271,13 +271,13 @@ class MonthlyMAPullbackStrategy(BaseStrategy):
                 f"  候选QRH-M {candidate.date} Px:{candidate.price:.2f} (GainRatio:{gain_ratio_calculated:.2f}) 验证通过且至今未失效。")
 
         if not valid_qrhs:
-            logger.info(f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 未找到任何有效的、未失效的QRH-M。")
+            logger.info(f"[{self.strategy_name}@{symbol}@{current_eval_date}] 未找到任何有效的、未失效的QRH-M。")
             return None
 
         # 从所有有效的QRH中选择价格最高的
         highest_valid_qrh = max(valid_qrhs, key=lambda q: q.price)
         logger.info(
-            f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 选择的最终有效QRH-M: {highest_valid_qrh.price:.2f} @ {highest_valid_qrh.date}")
+            f"[{self.strategy_name}@{symbol}@{current_eval_date}] 选择的最终有效QRH-M: {highest_valid_qrh.price:.2f} @ {highest_valid_qrh.date}")
         return highest_valid_qrh
 
     def _calculate_monthly_mas(self, df_monthly: pd.DataFrame) -> pd.DataFrame:
@@ -491,14 +491,14 @@ class MonthlyMAPullbackStrategy(BaseStrategy):
                     f"  StrokeM {log_stroke_idx}: Dir={stroke.direction}, Start={start_k.dt}(H:{start_k.h:.2f},L:{start_k.l:.2f}), End={end_k.dt}(H:{end_k.h:.2f},L:{end_k.l:.2f})")
 
 
-    def run_for_stock(self, stock_code: str, current_eval_date: date, data: Dict[str, pd.DataFrame]) -> List[
+    def run_for_stock(self, symbol: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[
         StrategyResult]:
         self._initialize_state_for_stock()  # 只重置K线和当前QRH
         results: List[StrategyResult] = []
 
         df_monthly_orig = data.get("monthly")
         if df_monthly_orig is None or df_monthly_orig.empty: return results
-        df_monthly_history = df_monthly_orig[df_monthly_orig['date'] <= current_eval_date].copy()
+        df_monthly_history = df_monthly_orig[df_monthly_orig['date'] <= current_date].copy()
 
         min_len_req = max(self.params['monthly_ma_long'], self.params['monthly_ma_peak_qualify_period'],
                           self.params['monthly_peak_recent_gain_periods'],
@@ -506,7 +506,7 @@ class MonthlyMAPullbackStrategy(BaseStrategy):
         if len(df_monthly_history) < min_len_req: return results
 
         df_monthly_history = self._calculate_monthly_mas(df_monthly_history)
-        current_bar_m = df_monthly_history[df_monthly_history['date'] == current_eval_date].iloc[0]
+        current_bar_m = df_monthly_history[df_monthly_history['date'] == current_date].iloc[0]
         current_bar_m_iloc = df_monthly_history.index.get_loc(current_bar_m.name)
 
         chanlun_lookback = self.params['monthly_chanlun_lookback_periods']
@@ -523,7 +523,7 @@ class MonthlyMAPullbackStrategy(BaseStrategy):
 
         # 2. 从这些候选者中筛选出最高的、有效的、且至今未失效的QRH-M
         self._qualified_ref_high_m = self._get_highest_valid_qrh_monthly(
-            potential_peaks, df_monthly_history, current_eval_date, stock_code
+            potential_peaks, df_monthly_history, current_date, symbol
         )
 
         # 3. 如果存在有效的QRH-M，则检查买入信号
@@ -549,7 +549,7 @@ class MonthlyMAPullbackStrategy(BaseStrategy):
 
             ma30m_str = f"{ma30m_val:.2f}" if pd.notna(ma30m_val) else "N/A"
             logger.debug(
-                f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 月线信号条件评估 (QRH: {qrh_m.price:.2f}@{qrh_m.date}): "
+                f"[{self.strategy_name}@{symbol}@{current_date}] 月线信号条件评估 (QRH: {qrh_m.price:.2f}@{qrh_m.date}): "
                 f"M1(回撤):{cond_m1_pullback}, M2(近MA30M):{cond_m2_near_ma30m} (Low:{cm_low:.2f}, MA30M:{ma30m_str}), "
                 f"M3(MA排列):{cond_m3_ma_alignment}, M4(MA30M升/平):{cond_m4_ma30m_rising_or_flat}")
 
@@ -563,11 +563,11 @@ class MonthlyMAPullbackStrategy(BaseStrategy):
                     "conditions_met": {"M1": cond_m1_pullback, "M2": cond_m2_near_ma30m, "M3": cond_m3_ma_alignment,
                                        "M4": cond_m4_ma30m_rising_or_flat}
                 }
-                results.append(StrategyResult(stock_code, current_eval_date, self.strategy_name, details=details,
+                results.append(StrategyResult(symbol, current_date, self.strategy_name, details=details,
                                               timeframe="monthly"))
-                logger.info(f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 月线级别买入信号产生！")
+                logger.info(f"[{self.strategy_name}@{symbol}@{current_date}] 月线级别买入信号产生！")
         else:
-            logger.debug(f"[{self.strategy_name}@{stock_code}@{current_eval_date}] 无有效QRH-M，不产生信号。")
+            logger.debug(f"[{self.strategy_name}@{symbol}@{current_date}] 无有效QRH-M，不产生信号。")
 
         return results
 
@@ -598,70 +598,70 @@ if __name__ == '__main__':
     main_logger = logging.getLogger(__name__ + "_main_test")
 
     # --- 要分析的目标日期 ---
-    target_stock_code = "000887"
+    target_symbol = "000887"
     target_eval_date_str = "2021-04-30"  # 您关注的日期
     # target_eval_date_str = "2015-10-30" # 另一个您可以测试的日期
     target_eval_date = datetime.strptime(target_eval_date_str, "%Y-%m-%d").date()
     temp_context_for_name = StrategyContext()
     strategy_name_for_log = MonthlyMAPullbackStrategy(temp_context_for_name).strategy_name
     main_logger.info(
-        f"开始 {strategy_name_for_log} 特定日期 [{target_eval_date_str}] 信号测试 for {target_stock_code}...")
+        f"开始 {strategy_name_for_log} 特定日期 [{target_eval_date_str}] 信号测试 for {target_symbol}...")
 
     db_session: Optional[Session] = None
     try:
         db_session = SessionLocal()
 
-        main_logger.info(f"\n\n========== 开始测试股票: {target_stock_code} on {target_eval_date_str} ==========")
+        main_logger.info(f"\n\n========== 开始测试股票: {target_symbol} on {target_eval_date_str} ==========")
         first_daily_date_obj = db_session.query(func.min(StockDaily.date)).filter(
-            StockDaily.symbol == target_stock_code).scalar()
+            StockDaily.symbol == target_symbol).scalar()
         last_daily_date_obj = db_session.query(func.max(StockDaily.date)).filter(
-            StockDaily.symbol == target_stock_code).scalar()
+            StockDaily.symbol == target_symbol).scalar()
 
         if not first_daily_date_obj or not last_daily_date_obj:
-            main_logger.error(f"数据库中未找到股票 {target_stock_code} 的日线数据范围。");
+            main_logger.error(f"数据库中未找到股票 {target_symbol} 的日线数据范围。");
             exit()
 
         start_date_load = first_daily_date_obj.strftime('%Y-%m-%d')
         end_date_load = last_daily_date_obj.strftime('%Y-%m-%d')
 
-        monthly_df_stock = dl_db.load_monthly_data(symbol=target_stock_code, start_date=start_date_load,
+        monthly_df_stock = dl_db.load_monthly_data(symbol=target_symbol, start_date=start_date_load,
                                                    end_date=end_date_load, db_session=db_session)
         if monthly_df_stock is None or monthly_df_stock.empty:
-            main_logger.error(f"未能从数据库加载股票 {target_stock_code} 的月线数据。");
+            main_logger.error(f"未能从数据库加载股票 {target_symbol} 的月线数据。");
             exit()
 
         monthly_df_stock['date'] = pd.to_datetime(monthly_df_stock['date']).dt.date
         monthly_df_stock.sort_values(by='date', inplace=True)
         monthly_df_stock.reset_index(drop=True, inplace=True)
-        main_logger.info(f"从数据库为 {target_stock_code} 加载并预处理了 {len(monthly_df_stock)} 条月线数据。")
+        main_logger.info(f"从数据库为 {target_symbol} 加载并预处理了 {len(monthly_df_stock)} 条月线数据。")
 
         if target_eval_date not in monthly_df_stock['date'].values:
             main_logger.error(
-                f"目标评估日期 {target_eval_date_str} 不在股票 {target_stock_code} 的月线数据中。请检查日期或数据源。")
+                f"目标评估日期 {target_eval_date_str} 不在股票 {target_symbol} 的月线数据中。请检查日期或数据源。")
             exit()
 
         context = StrategyContext(db_session=db_session, strategy_params={})
         strategy = MonthlyMAPullbackStrategy(context=context)
-        main_logger.info(f"[{target_stock_code}] 使用策略参数: {strategy.params}")
+        main_logger.info(f"[{target_symbol}] 使用策略参数: {strategy.params}")
 
         data_slice_for_run = {"monthly": monthly_df_stock[monthly_df_stock['date'] <= target_eval_date].copy()}
         if data_slice_for_run["monthly"].empty:
             main_logger.error(f"评估日期 {target_eval_date.isoformat()}: 月线数据切片为空。");
             exit()
 
-        main_logger.info(f"\n--- [{target_stock_code}] 运行策略: EvalDate={target_eval_date.isoformat()} ---")
+        main_logger.info(f"\n--- [{target_symbol}] 运行策略: EvalDate={target_eval_date.isoformat()} ---")
         signals = strategy.run_for_stock(
-            stock_code=target_stock_code,
-            current_eval_date=target_eval_date,
+            symbol=target_symbol,
+            current_date=target_eval_date,
             data=data_slice_for_run
         )
         if signals:
             for sig in signals:
                 main_logger.info(
-                    f"[{target_stock_code}] 买入信号 @ {sig.signal_date.isoformat()} (策略名: {sig.strategy_name}, 时间级别: {sig.timeframe})\n详细信息: {sig.details}")
+                    f"[{target_symbol}] 买入信号 @ {sig.signal_date.isoformat()} (策略名: {sig.strategy_name}, 时间级别: {sig.timeframe})\n详细信息: {sig.details}")
         else:
             main_logger.info(
-                f"评估日期 {target_eval_date.isoformat()}: 股票 {target_stock_code} 未产生任何月线回踩买入信号。")
+                f"评估日期 {target_eval_date.isoformat()}: 股票 {target_symbol} 未产生任何月线回踩买入信号。")
 
     except ImportError as e:
         main_logger.error(f"导入模块失败: {e}.")

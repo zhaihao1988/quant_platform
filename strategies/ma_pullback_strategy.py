@@ -30,7 +30,7 @@ except ImportError:
 
     @dataclass
     class StrategyResult:
-        stock_code: str
+        symbol: str
         signal_date: date
         strategy_name: str
         signal_type: str = "BUY"
@@ -39,7 +39,7 @@ except ImportError:
 
         def __str__(self):
             details_str = ", ".join([f"{k}: {v}" for k, v in self.details.items()])
-            return (f"StrategyResult(stock_code='{self.stock_code}', signal_date='{self.signal_date}', "
+            return (f"StrategyResult(symbol='{self.symbol}', signal_date='{self.signal_date}', "
                     f"strategy_name='{self.strategy_name}', signal_type='{self.signal_type}', details={{{details_str}}})")
 
 
@@ -53,7 +53,7 @@ except ImportError:
             pass
 
         @abstractmethod
-        def run_for_stock(self, stock_code: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[
+        def run_for_stock(self, symbol: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[
             StrategyResult]:
             pass
 
@@ -383,26 +383,26 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
         if new_candidate_found_this_step:
             self._uptrend_invalidated = False
 
-    def _check_uptrend_invalidation(self, df_full_history_with_mas: pd.DataFrame, current_stock_code: str,
+    def _check_uptrend_invalidation(self, df_full_history_with_mas: pd.DataFrame, current_symbol: str,
                                     current_eval_date: date):
         logger.debug(
-            f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Entered _check_uptrend_invalidation.")
+            f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] Entered _check_uptrend_invalidation.")
         logger.debug(
-            f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Current _qualified_ref_high for invalidation check: {self._qualified_ref_high}")
+            f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] Current _qualified_ref_high for invalidation check: {self._qualified_ref_high}")
 
         if not self._qualified_ref_high or not self._qualified_ref_high.is_fully_qualified:  # Check initial qualification too
             logger.debug(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Exiting _check_uptrend_invalidation: No qualified_ref_high or not initially fully qualified.")
+                f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] Exiting _check_uptrend_invalidation: No qualified_ref_high or not initially fully qualified.")
             return False  # False means "not invalidated" (because there's nothing to invalidate or it wasn't qualified to begin with)
 
         qrh_idx = self._qualified_ref_high.original_idx
         qrh_date = self._qualified_ref_high.date
         logger.debug(
-            f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] QualifiedRefHigh for invalidation: Idx={qrh_idx}, Date={qrh_date}, Price={self._qualified_ref_high.price}")
+            f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] QualifiedRefHigh for invalidation: Idx={qrh_idx}, Date={qrh_date}, Price={self._qualified_ref_high.price}")
 
         if qrh_idx not in df_full_history_with_mas.index:
             logger.warning(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] QualifiedRefHigh original_idx {qrh_idx} (date {qrh_date}) not in df_full_history_with_mas. Cannot check invalidation.")
+                f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] QualifiedRefHigh original_idx {qrh_idx} (date {qrh_date}) not in df_full_history_with_mas. Cannot check invalidation.")
             return False  # Cannot determine, assume not invalidated for safety, or handle as error
 
         qrh_loc = df_full_history_with_mas.index.get_loc(qrh_idx)
@@ -410,11 +410,11 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
         df_after_qrh = df_full_history_with_mas.iloc[qrh_loc + 1:]
 
         logger.debug(
-            f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] df_after_qrh for invalidation check has {len(df_after_qrh)} rows (from {df_after_qrh.iloc[0]['date'] if not df_after_qrh.empty else 'N/A'} to {df_after_qrh.iloc[-1]['date'] if not df_after_qrh.empty else 'N/A'}). Is empty: {df_after_qrh.empty}")
+            f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] df_after_qrh for invalidation check has {len(df_after_qrh)} rows (from {df_after_qrh.iloc[0]['date'] if not df_after_qrh.empty else 'N/A'} to {df_after_qrh.iloc[-1]['date'] if not df_after_qrh.empty else 'N/A'}). Is empty: {df_after_qrh.empty}")
 
         if df_after_qrh.empty:
             logger.debug(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Exiting _check_uptrend_invalidation: df_after_qrh is empty (no bars after QRH to check).")
+                f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] Exiting _check_uptrend_invalidation: df_after_qrh is empty (no bars after QRH to check).")
             return False  # No bars after QRH, so it cannot be invalidated by subsequent action yet.
 
         ma30_threshold_pct = self.params['high_invalidate_close_below_ma30_pct']
@@ -423,7 +423,7 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
         # Condition 1: Single day close significantly below MA30
         for idx_after, row_after in df_after_qrh.iterrows():
             logger.debug(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Invalidation Check (Cond1) on row: Date={row_after['date']}, Close={row_after['close']}, MA30={row_after.get(self.ma30_col_name)}"
+                f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] Invalidation Check (Cond1) on row: Date={row_after['date']}, Close={row_after['close']}, MA30={row_after.get(self.ma30_col_name)}"
             )
             close_price = row_after['close']
             ma30_val = row_after.get(self.ma30_col_name)
@@ -434,7 +434,7 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
                         f"QRH was P={self._qualified_ref_high.price:.2f} on {qrh_date}."
                     )
                     logger.debug(
-                        f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Condition 1 met for invalidation: {invalidation_reason}")
+                        f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] Condition 1 met for invalidation: {invalidation_reason}")
                     break
 
         if not invalidation_reason:  # Only check condition 2 if condition 1 not met
@@ -442,7 +442,7 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
             consecutive_closes_below_ma30 = 0
             for idx_after, row_after in df_after_qrh.iterrows():
                 logger.debug(
-                    f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Invalidation Check (Cond2) on row: Date={row_after['date']}, Close={row_after['close']}, MA30={row_after.get(self.ma30_col_name)}, ConsecutiveBelow={consecutive_closes_below_ma30}"
+                    f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] Invalidation Check (Cond2) on row: Date={row_after['date']}, Close={row_after['close']}, MA30={row_after.get(self.ma30_col_name)}, ConsecutiveBelow={consecutive_closes_below_ma30}"
                 )
                 close_price = row_after['close']
                 ma30_val = row_after.get(self.ma30_col_name)
@@ -455,7 +455,7 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
                                 f"QRH was P={self._qualified_ref_high.price:.2f} on {qrh_date}."
                             )
                             logger.debug(
-                                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Condition 2 met for invalidation: {invalidation_reason}")
+                                f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] Condition 2 met for invalidation: {invalidation_reason}")
                             break
                     else:
                         consecutive_closes_below_ma30 = 0
@@ -464,17 +464,17 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
 
         if invalidation_reason:
             logger.info(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] QualifiedRefHigh P={self._qualified_ref_high.price:.2f} D={self._qualified_ref_high.date} IS invalidated. Reason: {invalidation_reason}")
+                f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] QualifiedRefHigh P={self._qualified_ref_high.price:.2f} D={self._qualified_ref_high.date} IS invalidated. Reason: {invalidation_reason}")
             self._active_peak_candidate = None
             self._qualified_ref_high = None
             self._uptrend_invalidated = True
             return True  # True means "invalidated"
 
         logger.debug(
-            f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] QualifiedRefHigh P={self._qualified_ref_high.price:.2f} D={self._qualified_ref_high.date} REMAINS VALID after checking subsequent bars.")
+            f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] QualifiedRefHigh P={self._qualified_ref_high.price:.2f} D={self._qualified_ref_high.date} REMAINS VALID after checking subsequent bars.")
         return False  # False means "not invalidated"
 
-    def _validate_and_set_qualified_ref_high(self, df_full_history_with_mas: pd.DataFrame, current_stock_code: str,
+    def _validate_and_set_qualified_ref_high(self, df_full_history_with_mas: pd.DataFrame, current_symbol: str,
                                              current_eval_date: date) -> bool:  # Return bool indicating if a valid QRH was set
         if self._uptrend_invalidated:
             self._qualified_ref_high = None  # Ensure it's cleared if general uptrend was marked invalid
@@ -488,7 +488,7 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
 
         if candidate.original_idx not in df_full_history_with_mas.index:
             logger.warning(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Active peak original_idx {candidate.original_idx} (date: {candidate.date}) not found in history for gain calculation.")
+                f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] Active peak original_idx {candidate.original_idx} (date: {candidate.date}) not found in history for gain calculation.")
             self._qualified_ref_high = None
             return False
 
@@ -498,7 +498,7 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
 
         if period_df_for_gain.empty:
             logger.warning(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Empty period_df for gain calculation for peak at {candidate.date} (idx {candidate.original_idx}).")
+                f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] Empty period_df for gain calculation for peak at {candidate.date} (idx {candidate.original_idx}).")
             self._qualified_ref_high = None
             return False
 
@@ -524,19 +524,19 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
         if is_initially_fully_qualified:
             self._qualified_ref_high = temp_qrh_info  # Tentatively set
             logger.debug(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Candidate QRH P={candidate.price:.2f} D={candidate.date} passed initial MA and gain checks. Now checking for post-high invalidation..."
+                f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] Candidate QRH P={candidate.price:.2f} D={candidate.date} passed initial MA and gain checks. Now checking for post-high invalidation..."
             )
 
             # Immediately check this candidate for post-high invalidation
-            if self._check_uptrend_invalidation(df_full_history_with_mas, current_stock_code, current_eval_date):
+            if self._check_uptrend_invalidation(df_full_history_with_mas, current_symbol, current_eval_date):
                 # _check_uptrend_invalidation already set self._qualified_ref_high = None and self._uptrend_invalidated = True
                 logger.info(  # Changed to INFO as this is an important invalidation event
-                    f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Candidate QRH P={candidate.price:.2f} D={candidate.date} was immediately invalidated by post-high price action. No QRH set."
+                    f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] Candidate QRH P={candidate.price:.2f} D={candidate.date} was immediately invalidated by post-high price action. No QRH set."
                 )
                 return False  # Failed to set a valid QRH
             else:
                 logger.info(  # Changed to INFO for successful QRH confirmation
-                    f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Successfully set and validated QualifiedRefHigh: P={self._qualified_ref_high.price:.2f} D={self._qualified_ref_high.date}, GainRatio={gain_ratio_calculated:.2f}. Details: {self._qualified_ref_high}")
+                    f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] Successfully set and validated QualifiedRefHigh: P={self._qualified_ref_high.price:.2f} D={self._qualified_ref_high.date}, GainRatio={gain_ratio_calculated:.2f}. Details: {self._qualified_ref_high}")
                 return True  # Successfully set and validated QRH
         else:
             self._qualified_ref_high = temp_qrh_info  # Store even if not fully qualified, for logging/state
@@ -545,17 +545,17 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
             if not is_recent_gain_valid: reason_for_fail.append(
                 f"RecentGainInvalid (Ratio:{gain_ratio_calculated:.2f} vs Need:{self.params['peak_recent_gain_ratio']})")
             logger.debug(
-                f"[{self.strategy_name}@{current_stock_code}@{current_eval_date}] Active peak P={candidate.price:.2f} D={candidate.date} did NOT initially qualify. Reasons: {', '.join(reason_for_fail)}. StoredInfo: {self._qualified_ref_high}")
+                f"[{self.strategy_name}@{current_symbol}@{current_eval_date}] Active peak P={candidate.price:.2f} D={candidate.date} did NOT initially qualify. Reasons: {', '.join(reason_for_fail)}. StoredInfo: {self._qualified_ref_high}")
             return False  # Failed to set a valid QRH
 
-    def run_for_stock(self, stock_code: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[StrategyResult]:
+    def run_for_stock(self, symbol: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[StrategyResult]:
         self._initialize_state_for_stock()
         results: List[StrategyResult] = []
 
         daily_df_orig = data.get("daily")
         if daily_df_orig is None or daily_df_orig.empty or 'date' not in daily_df_orig.columns:
             logger.warning(
-                f"[{current_date.isoformat()}] {self.strategy_name}: {stock_code} No daily data or 'date' column missing.")
+                f"[{current_date.isoformat()}] {self.strategy_name}: {symbol} No daily data or 'date' column missing.")
             return results
 
         daily_df = daily_df_orig.copy()
@@ -570,7 +570,7 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
         df_full_history_for_analysis = daily_df[daily_df['date'] <= current_date].copy()
         if df_full_history_for_analysis.empty:
             logger.info(
-                f"[{current_date.isoformat()}] {self.strategy_name}: {stock_code} No historical daily data up to current date.")
+                f"[{current_date.isoformat()}] {self.strategy_name}: {symbol} No historical daily data up to current date.")
             return results
 
         min_bars_needed = max(self.params['ma_long'], self.params['ma_long_for_peak_qualify_period'],
@@ -578,13 +578,13 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
                                                                                       1) * 2 + 5
         if len(df_full_history_for_analysis) < min_bars_needed:
             logger.info(
-                f"[{self.strategy_name}@{stock_code}@{current_date}] Data too short ({len(df_full_history_for_analysis)} < {min_bars_needed}) for full analysis.")
+                f"[{self.strategy_name}@{symbol}@{current_date}] Data too short ({len(df_full_history_for_analysis)} < {min_bars_needed}) for full analysis.")
             return results
 
         df_full_history_with_mas = self._calculate_mas(df_full_history_for_analysis.copy())
         if df_full_history_with_mas.empty:
             logger.error(
-                f"[{self.strategy_name}@{stock_code}@{current_date}] df_full_history_with_mas is empty after MA calculation.")
+                f"[{self.strategy_name}@{symbol}@{current_date}] df_full_history_with_mas is empty after MA calculation.")
             return results
         current_bar_data_with_mas = df_full_history_with_mas.iloc[-1]
 
@@ -638,7 +638,7 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
         # 3. Validate the current active_peak_candidate.
         #    This function now internally calls _check_uptrend_invalidation for any QRH it's about to confirm.
         #    It returns True if a fully qualified and *still valid* QRH is set.
-        is_qrh_valid_and_set = self._validate_and_set_qualified_ref_high(df_full_history_with_mas, stock_code,
+        is_qrh_valid_and_set = self._validate_and_set_qualified_ref_high(df_full_history_with_mas, symbol,
                                                                          current_date)
 
         # --- Signal Generation ---
@@ -670,11 +670,11 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
                                     round(ma_long_val, 2) >= round(ma_long_prev_val, 2)
 
             logger.debug(
-                f"[{stock_code}@{current_date}] QRH: P={qrh.price:.2f} D={qrh.date}. "
+                f"[{symbol}@{current_date}] QRH: P={qrh.price:.2f} D={qrh.date}. "
                 f"SignalEval: C={current_close:.2f} L={current_low:.2f} MA{self.params['ma_short']}={ma_short_str} MA{self.params['ma_long']}={ma_long_str} PrevMA{self.params['ma_long']}={ma_long_prev_str} WMA={weekly_ma_str}"
             )
             logger.debug(
-                f"[{stock_code}@{current_date}] Conditions: A(PullbackFromHigh):{cond_A_pullback_from_high}, B(NearMA30):{cond_B_near_ma30}, "
+                f"[{symbol}@{current_date}] Conditions: A(PullbackFromHigh):{cond_A_pullback_from_high}, B(NearMA30):{cond_B_near_ma30}, "
                 f"C(AboveWMA):{cond_C_above_weekly_ma}, D(MAShort>MALong):{cond_D_short_ma_above_long_ma}, E(MALongRising):{cond_E_long_ma_rising}"
             )
 
@@ -696,13 +696,13 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
                     "QrhDetails": str(qrh)
                 }
                 results.append(
-                    StrategyResult(stock_code, current_date, self.strategy_name, "BUY", details=signal_details))
+                    StrategyResult(symbol, current_date, self.strategy_name, "BUY", details=signal_details))
                 logger.info(
-                    f"[{self.strategy_name}@{stock_code}@{current_date}] BUY SIGNAL. RefHigh P={ref_high_price:.2f} D={qrh.date}. "
+                    f"[{self.strategy_name}@{symbol}@{current_date}] BUY SIGNAL. RefHigh P={ref_high_price:.2f} D={qrh.date}. "
                     f"Trig C={current_close:.2f} L={current_low:.2f} MA{self.params['ma_long']}BuyRef={ma_long_str} WMA={weekly_ma_str}")
             elif qrh and qrh.is_fully_qualified:
                 logger.info(
-                    f"[{self.strategy_name}@{stock_code}@{current_date}] Qualified high P={qrh.price:.2f} D={qrh.date} found but other BUY conditions not met.")
+                    f"[{self.strategy_name}@{symbol}@{current_date}] Qualified high P={qrh.price:.2f} D={qrh.date} found but other BUY conditions not met.")
         else:
             qrh_status = "None"
             if self._qualified_ref_high:  # May exist but not fully qualified or invalidated
@@ -713,7 +713,7 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
                 qrh_status = "UptrendInvalidated (QRH was invalidated by post-high price action)."
 
             logger.info(
-                f"[{self.strategy_name}@{stock_code}@{current_date}] No BUY signal. Reason: No (or not fully qualified/validated) reference high. QRH_Status: {qrh_status}")
+                f"[{self.strategy_name}@{symbol}@{current_date}] No BUY signal. Reason: No (or not fully qualified/validated) reference high. QRH_Status: {qrh_status}")
         return results
 
 
@@ -803,7 +803,7 @@ if __name__ == "__main__":
 
         test_logger.info(f"Running strategy for {stock_to_test} on {target_date.isoformat()}...")
         signals = strategy_instance.run_for_stock(
-            stock_code=stock_to_test,
+            symbol=stock_to_test,
             current_date=target_date,
             data=data_for_strategy
         )

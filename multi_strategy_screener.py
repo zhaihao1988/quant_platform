@@ -3,394 +3,339 @@
 import pandas as pd
 import numpy as np
 import logging
-from datetime import datetime, date, timedelta,time
+from datetime import datetime, date, timedelta, time  # 确保 time 被导入
 from sqlalchemy.orm import Session
-from typing import List, Dict, Type, Optional
+from typing import List, Dict, Type, Optional, Any
+import os
 
 # --- 项目模块导入 ---
-# 假设的更高级的 BaseStrategy, StrategyResult, StrategyContext
-# 您需要确保这个 BaseStrategy 文件在您的项目中是这样的，或者更新它
-from strategies.base_strategy import BaseStrategy, StrategyResult, StrategyContext
 
-# 导入具体的策略类
-# (确保这些策略文件在 quant_platform/strategies/ 目录下，并且类名正确)
+from config.settings import settings
+from strategies.base_strategy import BaseStrategy, StrategyResult, StrategyContext
 from strategies.ma_pullback_strategy import AdaptedMAPullbackStrategy
 from strategies.monthly_ma_pullback_strategy import MonthlyMAPullbackStrategy
 from strategies.multi_level_cross_refactored_strategy import RefactoredMultiLevelCrossStrategy
-
-# 导入基本面分析器
 from analysis.fundamental_analyzer import FundamentalAnalyzer
 from strategies.breakout_strategy import BreakoutStrategy
-# 数据库相关
-from db.database import SessionLocal # 假设 SessionLocal 和 init_db
+from db.database import SessionLocal
 from db import crud
-from db.models import StockList  # 用于获取股票代码和名称
+from db.models import StockList
 from strategies.weekly_ma_pullback_strategy import WeeklyMAPullbackStrategy
 
 # --- 日志配置 ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+# 假设日志已在外部配置，如 main.py。如果单独运行此脚本，请取消注释或配置。
+# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- CSV 输出列顺序 ---
-# 与用户在 multi_level_cross_strategy_new.py 中定义的保持一致
+# --- CSV 输出列顺序 (使用英文键名，与 fundamental_analyzer 返回结果对应) ---
 CSV_COLUMN_ORDER = [
-    '股票代码', '股票简称', '信号日期', '信号来源', '信号级别',
-    'net_profit_positive_3y_latest', 'pe', 'pe_lt_30',
-    'revenue_growth_yoy', 'profit_growth_yoy', 'growth_positive',
-    'peg_like_ratio', 'peg_like_lt_1', 'error_reason'
+    'symbol',  # 股票代码 (来自 tech_signal)
+    'stock_name',  # 股票简称 (来自 stock_info)
+    'signal_date',  # 信号日期 (来自 tech_signal)
+    'strategy_name',  # 信号来源 (来自 tech_signal)
+    'signal_level',  # 信号级别 (由 screener 判断)
+    # 基本面指标 (键名与 fundamental_analyzer 返回的字典一致)
+    'market_cap_formatted',  # <--- 新增：格式化后的市值（带单位）
+    'pe',
+    'pb',
+    'revenue_growth_yoy',
+    'profit_growth_yoy',
+    'peg_like_ratio',
+    'net_profit_positive_3y_latest',
+    'growth_positive',
+    'pe_lt_30',
+    'peg_like_lt_1',
+    'tech_notes',  # 技术备注 (来自 tech_signal.notes)
+    'error_reason'  # 基本面分析的错误原因 (来自 fundamental_analyzer)
+    # 'market_cap' # 如果也想输出原始市值的数值，可以加这一列
 ]
-# 可以加入策略本身返回的 'details' 中的一些关键信息，如果需要的话
-# 例如：'reference_high_price', 'current_close_tech' (技术信号时的收盘价)
 
 # --- 筛选器配置 ---
-# 您可以根据需要调整这些配置
 CONFIG = {
-    "data_lookback_days": 750,  # 为策略加载大约3年的日线数据 (250 * 3)
-    "weekly_resample_lookback_factor": 5,  # 用于周线MA的额外因子 (针对MA回调策略)
-    "monthly_resample_lookback_factor": 20,  # 用于月线MA的额外因子 (针对MA回调策略)
-    "output_dir": "output",  # CSV输出目录
-    "strategies_to_run": [
+    "data_lookback_days": 750,
+    "output_dir": settings.REPORT_SAVE_PATH,  # 使用 settings 中的路径
+    "strategies_to_run": [  # 策略类列表
         AdaptedMAPullbackStrategy,
         RefactoredMultiLevelCrossStrategy,
         BreakoutStrategy,
         WeeklyMAPullbackStrategy,
         MonthlyMAPullbackStrategy,
     ],
-    "strategy_params": {  # 可选：为特定策略传递参数
-        "AdaptedMAPullbackStrategy": {
-            # 'ma_short': 5, # 如果要覆盖策略中的默认值
-        },
-        "RefactoredMultiLevelCrossStrategy": {
-            # "ma_list_map": { "daily": [5,10,20,60], ... } # 覆盖默认MA列表
-        },
-        "ChanBreakoutStrategy": { # <--- 为新策略配置参数 (可选)
+    "strategy_params": {  # 特定策略参数 (如果需要覆盖默认值)
+        "AdaptedMAPullbackStrategy": {},
+        "RefactoredMultiLevelCrossStrategy": {},
+        "ChanBreakoutStrategy": {  # 这是一个示例，如果您的策略列表中没有它，可以移除
             'pullback_depth_pct': 0.2,
             'max_price_vs_3year_low_ratio': 2,
             'volume_ratio_threshold': 2.0,
-            # 'pattern_identification_lookback_days': 250, # 默认250天
         }
     }
 }
 
 
+# --- 辅助函数：格式化大数字为亿/万单位 ---
+def format_large_number_to_unit_str(num: Optional[float], default_decimals: int = 2) -> str:
+    if pd.isna(num) or num is None: return ''
+    if np.isinf(num): return str(num)  # 'inf' 或 '-inf'
+    num_abs = abs(num)
+    sign = "-" if num < 0 else ""
+    if num_abs >= 1_0000_0000:
+        return f"{sign}{num_abs / 1_0000_0000:.{default_decimals}f}亿"
+    if num_abs >= 1_0000:
+        return f"{sign}{num_abs / 1_0000:.{default_decimals}f}万"
+    return f"{sign}{num_abs:.{default_decimals}f}"
 
 
-def get_analysis_date() -> date:
-    """
-    确定用于分析的日期。
-    如果当前时间在交易日收盘后（例如下午4点后），则使用当天日期。
-    否则，行为同以前，获取最近的已收盘交易日。
-    """
-    now = datetime.now()
-    today = now.date()
-    trading_close_time = time(16, 0) # 假设下午4点为收盘后判断点
+class MultiStrategyScreener:
+    def __init__(self, db_session: Session, strategies_classes: List[Type[BaseStrategy]],
+                 fundamental_analyzer: Optional[FundamentalAnalyzer] = None):
+        self.db_session = db_session
+        self.strategies_classes = strategies_classes  # 保存策略类
+        self.fundamental_analyzer = fundamental_analyzer
+        if self.fundamental_analyzer is None and FundamentalAnalyzer:
+            logger.info("MultiStrategyScreener 初始化时未提供 fundamental_analyzer，将尝试自行实例化。")
+            self.fundamental_analyzer = FundamentalAnalyzer(db_session)
 
-    # 检查今天是否是周末
-    if today.weekday() >= 5: # 周六 (5) 或 周日 (6)
-        # 如果是周末，则分析上周五
-        if today.weekday() == 5: # 周六
-            return today - timedelta(days=1)
-        else: # 周日
-            return today - timedelta(days=2)
-    else: # 今天是工作日 (周一到周五)
-        # 检查当前时间是否在收盘后
-        if now.time() >= trading_close_time:
-            # 如果是收盘后，并且是工作日，则分析当天
-            return today
-        else:
-            # 如果是盘中，或者是周一的盘前（需要分析上周五）
-            if today.weekday() == 0: # 周一盘前
-                return today - timedelta(days=3) # 分析上周五
-            else: # 周二到周五盘前
-                return today - timedelta(days=1) # 分析前一个交易日
+    def _get_stock_list(self) -> List[Dict[str, Any]]:
+        # crud.get_all_stocks 返回 List[StockList] (ORM对象列表)
+        stocks_db_objects = crud.get_all_stocks(self.db_session)
+        stock_list_for_processing = []
+        for stock_obj in stocks_db_objects:
+            if stock_obj and stock_obj.code and stock_obj.name:
+                stock_list_for_processing.append({'code': stock_obj.code, 'name': stock_obj.name})
+        return stock_list_for_processing
 
-def run_screener(analysis_date_str: Optional[str] = None):
-    """
-    执行多策略选股流程。
-    """
-    if analysis_date_str:
-        try:
-            analysis_date = datetime.strptime(analysis_date_str, "%Y-%m-%d").date()
-        except ValueError:
-            logger.error(f"提供的分析日期格式无效: {analysis_date_str}. 请使用 YYYY-MM-DD 格式。")
-            return
-    else:
-        analysis_date = get_analysis_date()
+    def run_screening(self, analysis_date: date,
+                      context_params: Optional[Dict] = None):  # context_params from caller is not used now
+        logger.info(f"开始执行多策略筛选（技术信号优先），分析日期: {analysis_date.isoformat()}")
+        # if context_params is None: context_params = {} # Not currently used for StrategyContext
 
-    logger.info(f"========== 多策略选股器开始运行 - 分析日期: {analysis_date.isoformat()} ==========")
+        all_final_output_data = []
+        stocks_to_process = self._get_stock_list()
 
-    db: Session = SessionLocal()  # type: ignore
-    # 确保数据库已初始化 (如果需要创建表等)
-    # init_db() # 通常在项目首次运行时执行，或由Alembic管理
+        if not stocks_to_process:
+            logger.warning("未能获取到股票列表，筛选中止。")
+            return  # db_session will be closed in __main__ or by the caller
 
-    # 1. 获取股票列表
-    logger.info("步骤 1: 获取股票列表...")
-    try:
-        stock_entities = crud.get_all_stocks(db)  # 假设 crud 中有 get_all_stocks() -> List[StockList]
-        if not stock_entities:
-            logger.warning("数据库中未找到股票列表 (stock_list 表为空或查询失败)。")
-            return
-        # stock_codes_to_scan = [s.code for s in stock_entities if s.code.startswith(('0','3','6'))] # 示例：只扫描A股主板/创业板/科创板
-        stock_codes_to_scan = {s.code: s.name for s in stock_entities}  # {代码: 名称}
-        logger.info(f"将扫描 {len(stock_codes_to_scan)} 只股票。")
-    except Exception as e:
-        logger.error(f"获取股票列表失败: {e}", exc_info=True)
-        db.close()
-        return
+        total_stocks = len(stocks_to_process)
+        logger.info(f"将对 {total_stocks} 只股票进行技术信号扫描。")
 
-    # 2. 初始化数据加载器和基本面分析器
-    # DataLoader的初始化可能需要配置，这里假设一个默认的或从context获取
-    # 对于这个脚本，我们可能直接调用其静态方法或实例化一个简单的版本
-    # 这里简化为在循环中按需加载，但更优化的方式是预加载或使用更高级的DataLoader
-    try:
-        # 假设 DataLoader 可以直接实例化或其加载函数是静态的/可直接调用
-        # 如果 DataLoader 需要 db_session 或 engine，请确保传递
-        # data_loader = DataLoader(db_session=db) # 或 DataLoader(engine=engine_instance)
-        # 这里我们先不在外部实例化，策略内部或加载函数会处理
-        pass
-    except Exception as e:
-        logger.error(f"初始化数据加载器失败: {e}", exc_info=True)
-        db.close()
-        return
+        for i, stock_info in enumerate(stocks_to_process):
+            current_processing_symbol = stock_info['code']
+            stock_name = stock_info['name']
 
-    fundamental_analyzer = FundamentalAnalyzer(db_session=db)
+            logger.debug(
+                f"--- 扫描技术信号 ({i + 1}/{total_stocks}): {current_processing_symbol} ({stock_name}) ---")
 
-    all_final_signals_data = []
-    processed_stocks_count = 0
+            # 1. Load data for strategies
+            data_for_strategies: Dict[str, pd.DataFrame] = {}
+            lookback_days = CONFIG.get("data_lookback_days", 750)
+            lookback_start_date = analysis_date - timedelta(days=lookback_days)
 
-    # 3. 遍历股票列表，执行策略和分析
-    for stock_code, stock_name in stock_codes_to_scan.items():
-        processed_stocks_count += 1
-        logger.info(
-            f"--- 开始处理股票 ({processed_stocks_count}/{len(stock_codes_to_scan)}): {stock_code} ({stock_name}) ---")
-
-        # a. 加载数据 (日线、周线、月线)
-        #    策略需要足够的回溯期来计算MA和识别模式
-        #    DataLoader应能提供一个包含 'daily', 'weekly', 'monthly' DataFrame 的字典
-        #    每个DataFrame的index应为日期，列包含 open, high, low, close, volume
-        try:
-            # 假设 crud 中有 load_stock_data_for_strategy 返回所需格式
-            # 或者 DataLoader 有类似方法
-            # data_start_date = analysis_date - timedelta(days=CONFIG["data_lookback_days"])
-            # raw_data_dict = data_loader.load_data_for_stock(
-            #     stock_code,
-            #     start_date=data_start_date, # 开始日期
-            #     end_date=analysis_date,     # 结束日期 (分析日)
-            #     timeframes=['daily', 'weekly', 'monthly'] # 需要的时间级别
-            # )
-
-            # 模拟数据加载 - 您需要替换为实际的 DataLoader 调用
-            # 确保您的 DataLoader 返回的 DataFrame 包含 'date', 'open', 'high', 'low', 'close', 'volume' 列
-            # 并且日期已是 datetime 类型或可以转换
-            lookback_start_date = analysis_date - timedelta(days=CONFIG["data_lookback_days"])
-            daily_data_df = crud.get_stock_daily_data_period(db, symbol=stock_code, start_date=lookback_start_date,
-                                                             end_date=analysis_date)
-
-            if daily_data_df is None or daily_data_df.empty:
-                logger.warning(
-                    f"股票 {stock_code} 在日期范围 {lookback_start_date} 到 {analysis_date} 无日线数据。跳过。")
-                continue
-
-            # BaseStrategyApp 通常会处理周线和月线的生成，如果策略本身不处理
-            # 但我们的 RefactoredMultiLevelCrossStrategy 内部会从日线重采样
-            # AdaptedMAPullbackStrategy 也需要周线数据。
-            # 这里，我们只传递日线，并假设策略或其调用者会处理周/月转换
-            # 或者，如果 DataLoader 能直接提供多级别数据，则更好。
-            # 为简化，我们传递日线，并构建一个基础的周线和月线（如果适用）
-
-            data_for_strategies: Dict[str, pd.DataFrame] = {"daily": daily_data_df}
-
-            # 生成周线数据 (如果 AdapatedMAPullbackStrategy 需要)
-            # 确保日期索引用 'date' 列，并按日期升序排序
-            if not daily_data_df.empty:
-                daily_df_sorted = daily_data_df.sort_values(by='date').copy()
-                daily_df_sorted['date'] = pd.to_datetime(daily_df_sorted['date'])
-                daily_df_sorted = daily_df_sorted.set_index('date')
-
-                try:
-                    weekly_df = daily_df_sorted.resample('W-FRI').agg({
-                        'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
-                    }).dropna(how='all').reset_index()
-                    if not weekly_df.empty: data_for_strategies["weekly"] = weekly_df
-                except Exception as e_resample_w:
-                    logger.warning(f"为 {stock_code} 生成周线数据失败: {e_resample_w}")
-
-                try:
-                    monthly_df = daily_df_sorted.resample('ME').agg({  # ME for Month End
-                        'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
-                    }).dropna(how='all').reset_index()
-                    if not monthly_df.empty: data_for_strategies["monthly"] = monthly_df
-                except Exception as e_resample_m:
-                    logger.warning(f"为 {stock_code} 生成月线数据失败: {e_resample_m}")
-
-        except Exception as e_load:
-            logger.error(f"为股票 {stock_code} 加载数据失败: {e_load}", exc_info=True)
-            continue
-
-        # b. 运行策略
-        technical_signals: List[StrategyResult] = []
-        for StrategyClass in CONFIG["strategies_to_run"]:
-            # StrategyClass 是策略的类本身，例如 AdaptedMAPullbackStrategy
-
-            # 1. 首先，创建完整的 StrategyContext 实例
-            strategy_context = StrategyContext(
-                db_session=db,
-                current_date=analysis_date,  # <--- 确保 analysis_date 在这里被传递
-                strategy_params=CONFIG["strategy_params"]
+            daily_data_df = crud.get_stock_daily_data_period(
+                self.db_session, symbol=current_processing_symbol,
+                start_date=lookback_start_date, end_date=analysis_date
             )
-
-            try:
-                # 2. 然后，使用这个完整的 context 来实例化策略
-                strategy_instance = StrategyClass(context=strategy_context)
-
-                # 3. 现在可以安全地从实例获取 strategy_name
-                strategy_name_from_instance = strategy_instance.strategy_name
-                logger.info(f"  执行策略: {strategy_name_from_instance} for {stock_code}")
-
-                signals_from_strategy = strategy_instance.run_for_stock(
-                    stock_code=stock_code,
-                    current_date=analysis_date,  # run_for_stock 也需要 current_date
-                    data=data_for_strategies
-                )
-                if signals_from_strategy:
-                    technical_signals.extend(signals_from_strategy)
-                    for sig in signals_from_strategy:
-                        # 使用从实例获取的名称，而不是类名直接作为字符串
-                        logger.info(
-                            f"技术信号: {stock_code} ({stock_name}) on {sig.signal_date.isoformat()} by {sig.strategy_name} ({sig.details.get('level', 'N/A')})")  # sig.strategy_name 来自 StrategyResult
-            except Exception as e_strat:
-                # 如果想在错误日志中包含策略类名，可以这样做：
-                logger.error(f"策略 {StrategyClass.__name__} 在股票 {stock_code} 上执行失败: {e_strat}",
-                             exc_info=True)
-
-        # c. 对每个技术信号进行基本面分析
-        if not technical_signals:
-            logger.info(f"股票 {stock_code} ({stock_name}) 在 {analysis_date.isoformat()} 无任何策略产生技术信号。")
-            continue
-
-        for tech_signal in technical_signals:
-            if tech_signal.signal_date != analysis_date:  # 确保只处理当天的信号
-                continue
-
-            logger.info(
-                f"对信号进行基本面分析: {stock_code} by {tech_signal.strategy_name} on {tech_signal.signal_date.isoformat()}")
-
-            # 获取信号日当天的收盘价用于PE计算等
-            # 假设 daily_data_df 是按日期升序排列的，并且包含 analysis_date
-            signal_day_price_data = daily_data_df[
-                pd.to_datetime(daily_data_df['date']).dt.date == tech_signal.signal_date]
-            current_close_price = None
-            if not signal_day_price_data.empty:
-                current_close_price = signal_day_price_data['close'].iloc[0]
+            if daily_data_df is not None and not daily_data_df.empty:
+                data_for_strategies["daily"] = daily_data_df
             else:
-                logger.warning(f"无法获取股票 {stock_code} 在信号日 {tech_signal.signal_date.isoformat()} 的收盘价。")
-                # 可以选择跳过此信号的基本面分析，或用None价格（会导致PE等无法计算）
-                # continue # 如果严格要求价格
-            # ---- 简洁的信号级别判断 ----
-            signal_level = "Daily"  # 默认
-            if tech_signal.strategy_name == "WeeklyMAPullbackStrategy":
-                signal_level = "Weekly"
-            elif tech_signal.strategy_name == "MonthlyMAPullbackStrategy":
-                signal_level = "Monthly"
-            # 如果有其他策略也需要特定级别，可以在这里添加 elif tech_signal.strategy_name == "OtherStrategyName": signal_level = "ItsLevel"
-            # ---- 修改结束 ----
-            if current_close_price is None:
-                logger.warning(f"由于缺少信号日收盘价，跳过 {stock_code} 的基本面分析。")
-                # 创建一个只包含技术部分和错误信息的条目
-                signal_output_data = {
-                    "股票代码": tech_signal.stock_code,
-                    "股票简称": stock_name,
-                    "信号日期": tech_signal.signal_date.isoformat(),
-                    "信号来源": tech_signal.strategy_name,
-                    "信号级别": signal_level,  # MA回调策略可能没有level
-                    "error_reason": "Missing closing price for fundamental analysis"
-                }
-                all_final_signals_data.append(signal_output_data)
+                logger.warning(f"股票 {current_processing_symbol} 无日线数据。跳过此股票的技术策略执行。")
                 continue
 
-            try:
-                fundamental_metrics = fundamental_analyzer.analyze_stock(
-                    stock_code=tech_signal.stock_code,
-                    signal_date=tech_signal.signal_date,
-                    current_price=current_close_price
+            weekly_data_df = crud.get_stock_weekly_data_period(
+                self.db_session, symbol=current_processing_symbol,
+                start_date=lookback_start_date, end_date=analysis_date
+            )
+            if weekly_data_df is not None and not weekly_data_df.empty:
+                data_for_strategies["weekly"] = weekly_data_df
+            else:
+                logger.info(f"股票 {current_processing_symbol} 在指定期间无周线数据。")
+
+            monthly_data_df = crud.get_stock_monthly_data_period(
+                self.db_session, symbol=current_processing_symbol,
+                start_date=lookback_start_date, end_date=analysis_date
+            )
+            if monthly_data_df is not None and not monthly_data_df.empty:
+                data_for_strategies["monthly"] = monthly_data_df
+            else:
+                logger.info(f"股票 {current_processing_symbol} 在指定期间无月线数据。")
+
+            # 2. Execute technical strategies
+            generated_technical_signals_on_analysis_date: List[StrategyResult] = []
+            for StrategyClass in self.strategies_classes:
+                # ***MODIFICATION START***
+                # Create StrategyContext first
+                strategy_specific_params = CONFIG.get("strategy_params", {}).get(StrategyClass.__name__, {})
+                strategy_context_obj = StrategyContext(
+                    db_session=self.db_session,  # Pass the db_session from MultiStrategyScreener
+                    current_date=analysis_date,
+                    strategy_params=strategy_specific_params
                 )
+                # Instantiate strategy by passing the context object
+                strategy_instance = StrategyClass(context=strategy_context_obj)
+                # ***MODIFICATION END***
 
-                # 合并技术信号和基本面数据
-                signal_output_data = {
-                    "股票代码": tech_signal.stock_code,
-                    "股票简称": stock_name,
-                    "信号日期": tech_signal.signal_date.isoformat(),
-                    "信号来源": tech_signal.strategy_name,
-                    "信号级别": signal_level,  # MA回调策略的level可以设为"Daily"
-                    # 添加基本面指标
-                    **fundamental_metrics  # 解包字典
-                }
-                # 如果需要，可以从 tech_signal.details 中提取更多技术指标加入
-                # signal_output_data["tech_detail_example"] = tech_signal.details.get("some_key")
+                try:
+                    logger.info(f"  执行策略: {strategy_instance.strategy_name} for {current_processing_symbol}")
+                    signals = strategy_instance.run_for_stock(
+                        symbol=current_processing_symbol,
+                        current_date=analysis_date,  # All strategies now accept current_date
+                        data=data_for_strategies
+                    )
+                    if signals:
+                        for sig in signals:
+                            if sig.signal_date == analysis_date and sig.signal_type != "NO_SIGNAL":
+                                generated_technical_signals_on_analysis_date.append(sig)
+                except Exception as e_strat:
+                    logger.error(
+                        f"策略 {StrategyClass.__name__} 在股票 {current_processing_symbol} 上执行失败: {e_strat}",
+                        exc_info=True)
 
-                all_final_signals_data.append(signal_output_data)
+            if not generated_technical_signals_on_analysis_date:
                 logger.info(
-                    f"基本面分析完成: {stock_code}. PE: {fundamental_metrics.get('pe', 'N/A')}, GrowthPositive: {fundamental_metrics.get('growth_positive', 'N/A')}")
+                    f"股票 {current_processing_symbol} ({stock_name}) 在 {analysis_date.isoformat()} 无有效技术信号。")
+                continue
 
-            except Exception as e_fund:
-                logger.error(f"对股票 {stock_code} 进行基本面分析失败: {e_fund}", exc_info=True)
-                # 记录一个包含错误信息的条目
-                signal_output_data = {
-                    "股票代码": tech_signal.stock_code,
-                    "股票简称": stock_name,
-                    "信号日期": tech_signal.signal_date.isoformat(),
-                    "信号来源": tech_signal.strategy_name,
-                    "信号级别": tech_signal.details.get("level", "Daily"),
-                    "error_reason": f"Fundamental analysis failed: {str(e_fund)}"
+            # 3. Fundamental Analysis if technical signals exist
+            logger.info(f"股票 {current_processing_symbol} 发现技术信号，准备进行基本面分析...")
+            fundamental_metrics: Dict[str, Any] = {}
+            if self.fundamental_analyzer:
+                try:
+                    fundamental_metrics = self.fundamental_analyzer.analyze_stock(
+                        symbol=current_processing_symbol,
+                        signal_date=analysis_date
+                    )
+                except Exception as e_fund:
+                    logger.error(f"对股票 {current_processing_symbol} 进行基本面分析时出错: {e_fund}",
+                                 exc_info=True)
+                    fundamental_metrics = {'error_reason': f"基本面分析失败: {str(e_fund)}"}
+
+            # 4. Combine and store results
+            for tech_signal in generated_technical_signals_on_analysis_date:
+                signal_level = "Daily"  # Default
+                if tech_signal.strategy_name == "WeeklyMAPullbackStrategy":
+                    signal_level = "Weekly"
+                elif tech_signal.strategy_name == "MonthlyMAPullbackStrategy":
+                    signal_level = "Monthly"
+
+                output_row = {
+                    'symbol': tech_signal.symbol,
+                    'stock_name': stock_name,
+                    'signal_date': tech_signal.signal_date.isoformat(),
+                    'strategy_name': tech_signal.strategy_name,
+                    'signal_level': signal_level,
+                    'tech_notes': tech_signal.notes if tech_signal.notes and tech_signal.notes != "No specific notes" else None,
                 }
-                all_final_signals_data.append(signal_output_data)
+                for key_in_csv_order in CSV_COLUMN_ORDER:
+                    if key_in_csv_order in fundamental_metrics:
+                        output_row[key_in_csv_order] = fundamental_metrics[key_in_csv_order]
+                    elif key_in_csv_order == 'market_cap_formatted':
+                        output_row[key_in_csv_order] = fundamental_metrics.get('market_cap')
 
-    db.close()  # 关闭数据库会话
+                fm_error = fundamental_metrics.get('error_reason')
+                if fm_error:
+                    output_row['error_reason'] = f"{output_row.get('error_reason', '') or ''}; {fm_error}".strip('; ')
+                if not output_row.get('error_reason'): output_row['error_reason'] = None
 
-    # 4. 保存结果到CSV
-    if not all_final_signals_data:
-        logger.info("没有生成任何最终信号。")
-    else:
-        logger.info(f"总共生成 {len(all_final_signals_data)} 条最终信号。准备保存到CSV...")
-        final_df = pd.DataFrame(all_final_signals_data)
+                all_final_output_data.append(output_row)
 
-        # 确保所有预期的列都存在，如果某条记录缺少则填充NaN
-        for col in CSV_COLUMN_ORDER:
-            if col not in final_df.columns:
-                final_df[col] = np.nan
+        # self.db_session.close() # Session should be closed by the caller (__main__)
 
-        # 按照指定的顺序排列列，并只选择这些列
+        if not all_final_output_data:
+            logger.info("没有生成任何满足技术信号的最终结果。")
+            return  # db_session will be closed by the caller
+
+        final_df = pd.DataFrame(all_final_output_data)
+        for col_name in CSV_COLUMN_ORDER:
+            if col_name not in final_df.columns:
+                final_df[col_name] = np.nan
         final_df = final_df[CSV_COLUMN_ORDER]
 
-        # 格式化浮点数列为字符串，保留4位小数，处理np.inf
-        float_cols_to_format = ['pe', 'revenue_growth_yoy', 'profit_growth_yoy', 'peg_like_ratio']
-        for col in float_cols_to_format:
+        if 'market_cap_formatted' in final_df.columns:
+            final_df['market_cap_formatted'] = final_df['market_cap_formatted'].apply(
+                lambda x: format_large_number_to_unit_str(x, default_decimals=2)
+            )
+
+        float_ratio_cols_in_df = ['pe', 'pb', 'revenue_growth_yoy',
+                                  'profit_growth_yoy', 'peg_like_ratio']
+        for col in float_ratio_cols_in_df:
             if col in final_df.columns:
                 final_df[col] = final_df[col].apply(
-                    lambda x: f"{x:.4f}" if pd.notna(x) and np.isfinite(x) and isinstance(x, (int, float))
-                    else ('+Inf' if x == np.inf else ('-Inf' if x == -np.inf else (str(x) if pd.notna(x) else None)))
+                    lambda x: f"{x:.2f}" if pd.notna(x) and np.isfinite(x) and isinstance(x, (float, int))
+                    else ('Infinity' if x == np.inf else (
+                        '-Infinity' if x == -np.inf else (str(x) if pd.notna(x) else '')))
+                )
+
+        bool_cols_in_df = [
+            'net_profit_positive_3y_latest', 'growth_positive',
+            'pe_lt_30', 'peg_like_lt_1'
+        ]
+        for col in bool_cols_in_df:
+            if col in final_df.columns:
+                final_df[col] = final_df[col].apply(
+                    lambda x: "是" if x is True else (
+                        "否" if x is False else ("不适用" if pd.isna(x) or x is None else str(x)))
                 )
 
         output_filename = f"signals_selected_{analysis_date.isoformat()}.csv"
-        output_path = f"{CONFIG['output_dir']}/{output_filename}"
+        output_dir_path = settings.REPORT_SAVE_PATH
+
+        if not os.path.exists(output_dir_path):
+            try:
+                os.makedirs(output_dir_path, exist_ok=True)
+            except OSError as e_dir:
+                logger.error(f"创建输出目录 {output_dir_path} 失败: {e_dir}"); return
+        output_path = os.path.join(output_dir_path, output_filename)
         try:
-            # 确保输出目录存在
-            import os
-            os.makedirs(CONFIG['output_dir'], exist_ok=True)
             final_df.to_csv(output_path, index=False, encoding='utf-8-sig')
             logger.info(f"最终选股结果已保存到: {output_path}")
         except Exception as e_csv:
             logger.error(f"保存CSV文件失败 {output_path}: {e_csv}", exc_info=True)
 
-    logger.info(f"========== 多策略选股器运行结束 - 分析日期: {analysis_date.isoformat()} ==========")
+# (get_analysis_date 函数保持不变)
+def get_analysis_date() -> date:
+    now = datetime.now()
+    today = now.date()
+    trading_close_time = time(16, 0)
+    if today.weekday() >= 5:
+        return today - timedelta(days=today.weekday() - 4)
+    else:
+        if now.time() >= trading_close_time:
+            return today
+        else:
+            return today - timedelta(days=1 if today.weekday() != 0 else 3)
 
 
 if __name__ == "__main__":
-    # 可以接受命令行参数来指定分析日期
-    # import argparse
-    # parser = argparse.ArgumentParser(description="多策略每日选股器")
-    # parser.add_argument("--date", type=str, help="指定分析日期 (YYYY-MM-DD)。默认为最近交易日。")
-    # args = parser.parse_args()
-    # run_screener(analysis_date_str=args.date)
+    logger.info("开始执行 MultiStrategyScreener 独立测试...")
+    db_sess_main: Optional[Session] = None
+    try:
+        db_sess_main = SessionLocal()
+        if db_sess_main is None:
+            logger.error("无法获取数据库会话，测试中止。")
+            exit(1)
 
-    run_screener()  # 默认运行
+        active_strategies_classes = CONFIG.get("strategies_to_run", [])
+        if not active_strategies_classes:
+            logger.error("CONFIG 中未配置任何策略 (strategies_to_run 为空)。")
+            if db_sess_main: db_sess_main.close()
+            exit(1)
+
+        # *** 修改点：通过实例调用 run_screening ***
+        screener_instance = MultiStrategyScreener(
+            db_session=db_sess_main,
+            strategies_classes=active_strategies_classes  # 传递策略类列表
+            # fundamental_analyzer 会在 __init__ 中自动创建
+        )
+
+        analysis_target_date = get_analysis_date()
+        # analysis_target_date = date(2025, 5, 30) # 固定日期测试
+
+        screener_instance.run_screening(analysis_date=analysis_target_date)  # *** 调用实例方法 ***
+
+    except Exception as e_main_run:
+        logger.error(f"运行筛选器时发生严重错误: {e_main_run}", exc_info=True)
+    finally:
+        if db_sess_main:
+            db_sess_main.close()  # 在 MultiStrategyScreener 内部已关闭，这里是 __main__ 级别的会话
+            logger.info("主脚本数据库会话已关闭。MultiStrategyScreener 独立测试结束。")

@@ -87,7 +87,7 @@ class RefactoredMultiLevelCrossStrategy(BaseStrategy):
             logger.warning(f"无法为MA序列拟合趋势线: {e}")
             return False
 
-    def _detect_cross_signals_on_df(self, df: pd.DataFrame, ma_list: List[int], level: str, stock_code: str) -> List[
+    def _detect_cross_signals_on_df(self, df: pd.DataFrame, ma_list: List[int], level: str, symbol: str) -> List[
         StrategyResult]:
         """在处理好（已重采样并计算完MA）的DataFrame上检测金叉信号"""
         signals = []
@@ -102,15 +102,15 @@ class RefactoredMultiLevelCrossStrategy(BaseStrategy):
             # 这通常意味着MA30应该在ma_list中，或者额外计算
             # 为简化，我们假设如果check_ma30_trend_cond为True，则MA30已被包含在df的列中
             if 'MA30' not in df.columns:
-                logger.warning(f"[{stock_code}-{level}] 需要检查MA30趋势，但MA30列未计算。")
+                logger.warning(f"[{symbol}-{level}] 需要检查MA30趋势，但MA30列未计算。")
                 return signals
 
         if df is None or df.empty or len(df) < 2:
-            logger.debug(f"[{stock_code}-{level}] DataFrame为空或过短，无法检测金叉。")
+            logger.debug(f"[{symbol}-{level}] DataFrame为空或过短，无法检测金叉。")
             return signals
         if not all(col in df.columns for col in required_ma_cols):
             missing_cols = [col for col in required_ma_cols if col not in df.columns]
-            logger.warning(f"[{stock_code}-{level}] 缺少必要的MA列: {missing_cols}。跳过金叉检测。")
+            logger.warning(f"[{symbol}-{level}] 缺少必要的MA列: {missing_cols}。跳过金叉检测。")
             return signals
 
         # 确保 'close', 'date' 存在，以及 'volume' (如果需要检查)
@@ -118,7 +118,7 @@ class RefactoredMultiLevelCrossStrategy(BaseStrategy):
         if check_volume_cond: data_cols_to_check.append('volume')
         if not all(col in df.columns for col in data_cols_to_check):
             missing_cols = [col for col in data_cols_to_check if col not in df.columns]
-            logger.warning(f"[{stock_code}-{level}] 缺少必要的数据列: {missing_cols}。跳过金叉检测。")
+            logger.warning(f"[{symbol}-{level}] 缺少必要的数据列: {missing_cols}。跳过金叉检测。")
             return signals
 
         # 从有足够数据可以比较前一天开始迭代 (索引1)
@@ -181,7 +181,7 @@ class RefactoredMultiLevelCrossStrategy(BaseStrategy):
             if check_volume_cond: signal_details["volume"] = f"{current.get('volume', np.nan):.0f}"
 
             signals.append(StrategyResult(
-                stock_code=stock_code,
+                symbol=symbol,
                 signal_date=signal_date_obj,
                 strategy_name=self.strategy_name,
                 signal_type="BUY",
@@ -189,18 +189,18 @@ class RefactoredMultiLevelCrossStrategy(BaseStrategy):
             ))
         return signals
 
-    def run_for_stock(self, stock_code: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[StrategyResult]:
+    def run_for_stock(self, symbol: str, current_date: date, data: Dict[str, pd.DataFrame]) -> List[StrategyResult]:
         """为单只股票在指定当前日期执行策略逻辑。"""
         all_level_signals: List[StrategyResult] = []
 
         daily_df_full_history = data.get("daily")  # 完整历史日线数据
         if daily_df_full_history is None or daily_df_full_history.empty:
-            logger.warning(f"[{stock_code}@{current_date.isoformat()}] {self.strategy_name}: 无日线数据。")
+            logger.warning(f"[{symbol}@{current_date.isoformat()}] {self.strategy_name}: 无日线数据。")
             return all_level_signals
 
         # 确保 'date' 列存在，并转换为 datetime 对象以便正确处理
         if 'date' not in daily_df_full_history.columns:
-            logger.error(f"[{stock_code}@{current_date.isoformat()}] {self.strategy_name}: 日线数据缺少 'date' 列。")
+            logger.error(f"[{symbol}@{current_date.isoformat()}] {self.strategy_name}: 日线数据缺少 'date' 列。")
             return all_level_signals
 
         # 创建副本并处理日期
@@ -212,40 +212,40 @@ class RefactoredMultiLevelCrossStrategy(BaseStrategy):
         df_for_analysis = df_daily_processed[df_daily_processed['date'].dt.date <= current_date].copy()
         if df_for_analysis.empty:
             logger.info(
-                f"[{stock_code}@{current_date.isoformat()}] {self.strategy_name}: 无截至当前日期的历史日线数据。")
+                f"[{symbol}@{current_date.isoformat()}] {self.strategy_name}: 无截至当前日期的历史日线数据。")
             return all_level_signals
 
         for level in ["daily", "weekly", "monthly"]:
-            logger.debug(f"[{stock_code}@{current_date.isoformat()}] {self.strategy_name}: 处理 {level} 级别...")
+            logger.debug(f"[{symbol}@{current_date.isoformat()}] {self.strategy_name}: 处理 {level} 级别...")
 
             df_level_specific = df_for_analysis.copy()  # 从截至 current_date 的日线数据开始处理每个级别
 
             # 数据重采样以获取周线和月线数据
             if level == "weekly":
                 if len(df_level_specific) < 5:  # 需要至少5天数据才能形成一个周线点（粗略估计）
-                    logger.debug(f"[{stock_code}-{level}] 日线数据不足 ({len(df_level_specific)}) 无法生成周线。")
+                    logger.debug(f"[{symbol}-{level}] 日线数据不足 ({len(df_level_specific)}) 无法生成周线。")
                     continue
                 aggregation = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}
                 try:
                     df_level_specific = df_level_specific.set_index('date').resample('W-FRI').agg(aggregation).dropna(
                         how='all').reset_index()
                 except Exception as e:
-                    logger.error(f"[{stock_code}-{level}] 周线重采样失败: {e}", exc_info=True)
+                    logger.error(f"[{symbol}-{level}] 周线重采样失败: {e}", exc_info=True)
                     continue
             elif level == "monthly":
                 if len(df_level_specific) < 20:  # 需要至少约20天数据才能形成一个月线点
-                    logger.debug(f"[{stock_code}-{level}] 日线数据不足 ({len(df_level_specific)}) 无法生成月线。")
+                    logger.debug(f"[{symbol}-{level}] 日线数据不足 ({len(df_level_specific)}) 无法生成月线。")
                     continue
                 aggregation = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}
                 try:
                     df_level_specific = df_level_specific.set_index('date').resample('ME').agg(aggregation).dropna(
                         how='all').reset_index()  # 'M' for month end
                 except Exception as e:
-                    logger.error(f"[{stock_code}-{level}] 月线重采样失败: {e}", exc_info=True)
+                    logger.error(f"[{symbol}-{level}] 月线重采样失败: {e}", exc_info=True)
                     continue
 
             if df_level_specific.empty:
-                logger.warning(f"[{stock_code}-{level}] 重采样后的 {level} 级别DataFrame为空。")
+                logger.warning(f"[{symbol}-{level}] 重采样后的 {level} 级别DataFrame为空。")
                 continue
 
             # 计算MA
@@ -255,7 +255,7 @@ class RefactoredMultiLevelCrossStrategy(BaseStrategy):
             df_with_ma = self._calculate_ma(df_level_specific, ma_to_calculate)
 
             if df_with_ma.empty:
-                logger.warning(f"[{stock_code}-{level}] 计算MA后DataFrame为空。")
+                logger.warning(f"[{symbol}-{level}] 计算MA后DataFrame为空。")
                 continue
 
             # 特殊的周线MA30趋势判断 (如果配置了)
@@ -263,23 +263,23 @@ class RefactoredMultiLevelCrossStrategy(BaseStrategy):
                 if 'MA30' in df_with_ma.columns and not df_with_ma['MA30'].dropna().empty:
                     if len(df_with_ma['MA30'].dropna()) >= 4:  # 需要至少4个点（原脚本用4）来判断周线MA30趋势
                         if not self._is_ma_trending_up(df_with_ma['MA30'], window=4):
-                            logger.debug(f"[{stock_code}-{level}] 周线MA30未形成上升趋势，跳过此级别。")
+                            logger.debug(f"[{symbol}-{level}] 周线MA30未形成上升趋势，跳过此级别。")
                             continue  # 周线MA30趋势不满足，则不在此周线级别产生信号
                     else:
-                        logger.debug(f"[{stock_code}-{level}] 周线MA30有效数据点不足 (<4)，无法判断趋势。")
+                        logger.debug(f"[{symbol}-{level}] 周线MA30有效数据点不足 (<4)，无法判断趋势。")
                         continue  # 数据不足以判断趋势
                 else:
-                    logger.debug(f"[{stock_code}-{level}] 周线MA30未计算或无有效值。")
+                    logger.debug(f"[{symbol}-{level}] 周线MA30未计算或无有效值。")
                     continue  # MA30不存在或无效
 
             # 检测信号 (只关心在 current_date 产生的信号)
-            level_signals = self._detect_cross_signals_on_df(df_with_ma, ma_config_for_level, level, stock_code)
+            level_signals = self._detect_cross_signals_on_df(df_with_ma, ma_config_for_level, level, symbol)
 
             for sig_result in level_signals:
                 # _detect_cross_signals_on_df 返回的 signal_date 已经是 date 对象
                 if sig_result.signal_date == current_date:
                     all_level_signals.append(sig_result)
                     logger.info(
-                        f"策略 {self.strategy_name} 为股票 {stock_code} 在日期 {sig_result.signal_date.isoformat()} ({level}级别) 生成买入信号。")
+                        f"策略 {self.strategy_name} 为股票 {symbol} 在日期 {sig_result.signal_date.isoformat()} ({level}级别) 生成买入信号。")
 
         return all_level_signals

@@ -4,20 +4,18 @@ import pandas as pd
 import numpy as np
 import logging
 from typing import List, Dict, Optional, Any
-from datetime import date, timedelta, datetime  # datetime 确保存在
+from datetime import date, timedelta, datetime
 from sqlalchemy.orm import Session
 
-# 从您的项目中导入
-from db.database import get_db_session
-from db import crud  # 确保 crud 可被导入
-
-# from db.models import StockFinancial # 如果需要显式类型提示crud返回内容中的对象
+from db.database import get_db_session # 您的 get_db_session 可能不同
+from db import crud
 
 logger = logging.getLogger(__name__)
 
-# Constants from your multi_level_cross_strategy_new.py
+# Constants
 NET_PROFIT_FIELD = '归属于母公司所有者的净利润'
 REVENUE_FIELD = '营业总收入'
+EQUITY_FIELD = '归属于母公司所有者权益合计'  # <-- 新增：净资产 (股东权益) 字段名
 PE_THRESHOLD = 30.0
 PEG_LIKE_THRESHOLD = 1.0
 
@@ -26,479 +24,451 @@ class FundamentalAnalyzer:
     def __init__(self, db_session: Session):
         self.db_session = db_session
 
+    # _safe_extract_json_value 方法保持不变 (来自您提供的版本)
     def _safe_extract_json_value(self, report_data_json: Optional[Dict], key_chinese_name: str) -> Optional[float]:
-        """
-        安全地从类 JSONB 字典中提取数值。
-        优先尝试精确匹配 key_chinese_name。
-        如果精确匹配失败或值无效，则尝试查找 JSON 中键名包含 key_chinese_name 的项。
-        处理 None、空字符串、特殊非数字字符串、带单位（'万', '亿'）的数字、数字中的逗号及转换错误。
-        """
+        # ... (您提供的 _safe_extract_json_value 的完整实现) ...
         if report_data_json is None:
             return None
-
-        # 内部辅助函数，用于解析具体的值
         def _parse_value(value_to_parse: Any, original_key_for_log: str) -> Optional[float]:
-            if value_to_parse is None:
-                return None
-
-            # 处理值已经是数字类型（int, float, bool）的情况
+            if value_to_parse is None: return None
             if isinstance(value_to_parse, (int, float)):
                 num_val = float(value_to_parse)
-                if np.isnan(num_val) or np.isinf(num_val):
-                    return None
-                return num_val
-
-            # 期望 value_to_parse 是字符串
+                return None if np.isnan(num_val) or np.isinf(num_val) else num_val
             if not isinstance(value_to_parse, str):
-                logger.debug(
-                    f"值 '{value_to_parse}' (来自键 '{original_key_for_log}') 不是字符串或可识别的数字类型。类型为: {type(value_to_parse)}.")
+                logger.debug(f"Value '{value_to_parse}' (from key '{original_key_for_log}') not str or number. Type: {type(value_to_parse)}.")
                 return None
-
-            # 处理字符串值
             processed_value_str = value_to_parse.strip()
-
-            if not processed_value_str:  # 处理空字符串或strip后变为空字符串的情况
-                return None
-
-            if processed_value_str.lower() in ('--', 'n/a', '不适用', 'nan'):
-                return None
-
+            if not processed_value_str or processed_value_str.lower() in ('--', 'n/a', '不适用', 'nan'): return None
             multiplier = 1.0
             numeric_part_str = processed_value_str
-
             if '亿' in numeric_part_str:
                 multiplier = 100_000_000.0
                 numeric_part_str = numeric_part_str.replace('亿', '')
             elif '万' in numeric_part_str:
                 multiplier = 10_000.0
                 numeric_part_str = numeric_part_str.replace('万', '')
-
             numeric_part_str = numeric_part_str.replace(',', '')
-
             if not numeric_part_str.strip():
-                logger.debug(
-                    f"值 '{value_to_parse}' (来自键 '{original_key_for_log}') 在处理后得到空的数字部分 ('{numeric_part_str}')。")
+                logger.debug(f"Value '{value_to_parse}' (from key '{original_key_for_log}') processed to empty numeric part ('{numeric_part_str}').")
                 return None
-
             try:
                 num_val = float(numeric_part_str) * multiplier
-                if np.isnan(num_val) or np.isinf(num_val):
-                    return None
-                return num_val
+                return None if np.isnan(num_val) or np.isinf(num_val) else num_val
             except (ValueError, TypeError):
-                logger.debug(f"无法将值 '{value_to_parse}' (来自键 '{original_key_for_log}') 转换为浮点数。"
-                             f"尝试解析的部分为: '{numeric_part_str}'，乘数为 {multiplier}.")
+                logger.debug(f"Cannot convert value '{value_to_parse}' (from key '{original_key_for_log}') to float. Parsed part: '{numeric_part_str}', multiplier {multiplier}.")
                 return None
-
-        # --- 主要逻辑开始 ---
-        # 1. 尝试精确匹配
         exact_value = report_data_json.get(key_chinese_name)
-        parsed_exact_value = _parse_value(exact_value, key_chinese_name)  # 使用辅助函数解析
-
+        parsed_exact_value = _parse_value(exact_value, key_chinese_name)
         if parsed_exact_value is not None:
-            logger.debug(f"为 '{key_chinese_name}' 找到精确匹配，原始值: '{exact_value}', 解析后: {parsed_exact_value}")
+            logger.debug(f"For '{key_chinese_name}' found exact match, original: '{exact_value}', parsed: {parsed_exact_value}")
             return parsed_exact_value
         else:
-            # 如果 exact_value 存在但解析失败，日志已在 _parse_value 中记录
-            # 如果 exact_value 本身是 None (键不存在)，_parse_value 会返回 None
-            logger.debug(f"未能通过精确匹配 '{key_chinese_name}' 获取可用值 (原始值: '{exact_value}')。尝试模糊匹配...")
-
-        # 2. 如果精确匹配失败或值无效，则尝试模糊匹配 (查找包含 key_chinese_name 的键)
-        #    迭代顺序通常是字典的插入顺序 (Python 3.7+)
+            logger.debug(f"No usable value from exact match '{key_chinese_name}' (original: '{exact_value}'). Trying fuzzy...")
         for json_actual_key, json_actual_value in report_data_json.items():
             if isinstance(json_actual_key, str) and key_chinese_name in json_actual_key:
-                # 如果这个模糊匹配到的键就是我们精确查找过的键，并且精确查找时它的值是存在的但解析失败了，
-                # 那么就不需要再尝试解析同 一个无效值了。
-                # (如果精确查找时键不存在即 exact_value is None，这里仍会尝试，这是期望的行为，因为我们是基于 json_actual_key 去取 json_actual_value)
-                if json_actual_key == key_chinese_name and exact_value is not None:
-                    continue  # 之前精确匹配时已尝试过此键且值解析失败
-
-                parsed_like_value = _parse_value(json_actual_value, json_actual_key)  # 使用辅助函数解析
+                if json_actual_key == key_chinese_name and exact_value is not None: continue
+                parsed_like_value = _parse_value(json_actual_value, json_actual_key)
                 if parsed_like_value is not None:
-                    logger.debug(f"模糊匹配成功：JSON键 '{json_actual_key}' 包含目标 '{key_chinese_name}'。"
-                                 f"原始值: '{json_actual_value}', 解析后: {parsed_like_value}")
+                    logger.debug(f"Fuzzy match: JSON key '{json_actual_key}' contains target '{key_chinese_name}'. Original: '{json_actual_value}', parsed: {parsed_like_value}")
                     return parsed_like_value
-
-        logger.debug(f"未能为 '{key_chinese_name}' 通过精确或模糊匹配找到可用值。")
+        logger.debug(f"No usable value found for '{key_chinese_name}' by exact or fuzzy match.")
         return None
 
-    def _get_total_shares(self, stock_code: str, trade_date: date) -> Optional[float]:
-        """
-        Calculates total shares using (成交量 / turnover) for a given date.
-        Relies on a crud function to get daily market data.
-        MODIFIED: Assumes volume is in lots and 1 lot = 100 shares.
-        """
-        daily_data_entry = None
-        try:
-            daily_data_entry = crud.get_stock_daily_for_date(self.db_session, symbol=stock_code, trade_date=trade_date)
-        except AttributeError:  # Should not happen if crud is imported correctly
-            logger.warning(f"crud.get_stock_daily_for_date not found. Please implement it or check import.")
-            return None  # Explicitly return None here
-        except Exception as e:
-            logger.error(f"Error fetching daily market data for {stock_code} on {trade_date}: {e}", exc_info=True)
-            return None  # Explicitly return None here
 
-        if daily_data_entry and hasattr(daily_data_entry, 'volume') and hasattr(daily_data_entry, 'turnover'):
-            volume_in_lots = daily_data_entry.volume
-            turnover_rate = daily_data_entry.turnover
+    def _get_total_shares(self, symbol: str, trade_date: date) -> Optional[float]:
+        """
+        获取指定股票代码的最新总股本。
+        数据源: stock_share_details 表。
+        trade_date 参数目前未使用，因为我们总是获取最新的股本信息。
+        如果需要历史股本，StockShareDetail 表和此逻辑需要相应调整。
+        """
+        logger.debug(f"[{symbol}] 正在从 StockShareDetail 表获取总股本 (忽略日期 {trade_date})...")
+        share_detail_record = crud.get_stock_share_detail(self.db_session, symbol=symbol)
 
-            if volume_in_lots is not None and turnover_rate is not None and turnover_rate > 1e-9:
-                # 假设1手 = 100股 (根据之前的讨论，PE值过小的问题)
-                actual_volume_in_shares = volume_in_lots * 100.0
-                if actual_volume_in_shares > 0:  # Ensure shares are positive
-                    total_shares = actual_volume_in_shares / (turnover_rate / 100.0)
-                    if total_shares > 0:  # Ensure calculated total_shares is positive
-                        return total_shares
-                    else:
-                        logger.debug(
-                            f"[{stock_code}@{trade_date.isoformat()}] Calculated total shares is not positive ({total_shares}). Volume: {volume_in_lots}, Turnover: {turnover_rate}")
-                else:
-                    logger.debug(
-                        f"[{stock_code}@{trade_date.isoformat()}] Volume in lots ({volume_in_lots}) results in non-positive actual shares.")
+        if share_detail_record and share_detail_record.total_shares is not None:
+            total_shares_val = float(share_detail_record.total_shares) # 确保是 float
+            if total_shares_val > 1e-9: # 股本数应为正
+                logger.info(f"[{symbol}] 从数据库获取到总股本: {total_shares_val} 股 (数据源日期: {share_detail_record.data_source_date})")
+                return total_shares_val
             else:
-                logger.debug(
-                    f"[{stock_code}@{trade_date.isoformat()}] Volume or turnover rate is invalid for total shares calculation (V_lots:{volume_in_lots}, T:{turnover_rate}).")
+                logger.warning(f"[{symbol}] 从数据库获取的总股本非正数或过小: {total_shares_val}。")
         else:
-            logger.debug(
-                f"[{stock_code}@{trade_date.isoformat()}] No daily market data found or missing volume/turnover fields in the fetched data.")
+            if share_detail_record and share_detail_record.total_shares is None:
+                 logger.warning(f"[{symbol}] StockShareDetail 表中记录存在，但 total_shares 为空。")
+            else:
+                 logger.warning(f"[{symbol}] 未能在 StockShareDetail 表中找到总股本数据。")
         return None
 
-    def _fetch_financial_reports(self, stock_code: str, signal_date: date, report_type_db_key: str = 'benefit') -> Dict[
+    # _fetch_financial_reports 方法保持不变 (来自您提供的版本)
+    def _fetch_financial_reports(self, symbol: str, signal_date: date, report_type_db_key: str = 'benefit') -> Dict[
         str, Any]:
-        """
-        Fetches various necessary financial reports (JSON data) up to signal_date
-        by using crud.get_financial_reports_for_analyzer.
-        """
-        # 这个字典将存储最终的 JSON 数据，供分析器其他部分使用
+        # ... (您提供的 _fetch_financial_reports 的完整实现) ...
         fetched_reports_json_data = {
-            'latest_annual_for_pe': None,
-            'latest_any_for_others': None,
-            'prev_year_same_q_for_yoy': None,
-            'annual_reports_for_3y_check': []
+            'latest_annual_for_pe': None, 'latest_any_for_others': None,
+            'prev_year_same_q_for_yoy': None, 'annual_reports_for_3y_check': []
         }
-
         try:
-            # 1. 调用 crud 函数
-            # crud.py 中的参数名为 current_signal_date
             reports_from_crud_models = crud.get_financial_reports_for_analyzer(
-                db=self.db_session,
-                stock_code=stock_code,
-                report_type_db_key=report_type_db_key,
-                current_signal_date=signal_date
+                db=self.db_session, symbol=symbol,
+                report_type_db_key=report_type_db_key, current_signal_date=signal_date
             )
-
-            # 2. 从返回的 StockFinancial 模型对象中提取 .data (JSON)
             latest_annual_sf_model = reports_from_crud_models.get('latest_annual_report')
             if latest_annual_sf_model and hasattr(latest_annual_sf_model, 'data'):
                 fetched_reports_json_data['latest_annual_for_pe'] = latest_annual_sf_model.data
-
-            latest_quarterly_sf_model = reports_from_crud_models.get(
-                'latest_quarterly_report')  # 这对应之前的 'latest_any_for_others'
+            latest_quarterly_sf_model = reports_from_crud_models.get('latest_quarterly_report')
             if latest_quarterly_sf_model and hasattr(latest_quarterly_sf_model, 'data'):
                 fetched_reports_json_data['latest_any_for_others'] = latest_quarterly_sf_model.data
-
             prev_year_sf_model = reports_from_crud_models.get('previous_year_same_quarter_report')
             if prev_year_sf_model and hasattr(prev_year_sf_model, 'data'):
                 fetched_reports_json_data['prev_year_same_q_for_yoy'] = prev_year_sf_model.data
-
-            # 处理年报列表
-            last_3_annual_sf_models_list = reports_from_crud_models.get('last_3_annual_reports', [])  # 使用 .get 提供默认空列表
+            last_3_annual_sf_models_list = reports_from_crud_models.get('last_3_annual_reports', [])
             for sf_model in last_3_annual_sf_models_list:
-                if sf_model and hasattr(sf_model, 'data'):  # 确保对象存在且有 .data 属性
+                if sf_model and hasattr(sf_model, 'data'):
                     fetched_reports_json_data['annual_reports_for_3y_check'].append(sf_model.data)
-
-            # 添加日志来确认从crud获取的数据情况
-            logger.debug(
-                f"[{stock_code}@{signal_date.isoformat()}] CRUD 函数 ({crud.get_financial_reports_for_analyzer.__name__}) 返回的报告摘要:")
-            logger.debug(
-                f"  最新年报 (用于PE): {'已找到' if fetched_reports_json_data['latest_annual_for_pe'] else '未找到'}")
-            logger.debug(
-                f"  最新季报/任何报告: {'已找到' if fetched_reports_json_data['latest_any_for_others'] else '未找到'}")
-            logger.debug(
-                f"  去年同期报告 (用于YoY): {'已找到' if fetched_reports_json_data['prev_year_same_q_for_yoy'] else '未找到'}")
-            logger.debug(
-                f"  过去3年年报数量 (用于3年盈利检查): {len(fetched_reports_json_data['annual_reports_for_3y_check'])}")
-
-        except AttributeError as e:  # 例如，如果 .data 属性不存在
-            logger.error(
-                f"在处理来自 crud 的报告时发生 AttributeError ({stock_code} @ {signal_date}): {e}", exc_info=True)
+            logger.debug(f"[{symbol}@{signal_date.isoformat()}] CRUD ({crud.get_financial_reports_for_analyzer.__name__}) for '{report_type_db_key}' summary:")
+            logger.debug(f"  Latest Annual: {'Found' if fetched_reports_json_data['latest_annual_for_pe'] else 'Not Found'}")
+            logger.debug(f"  Latest Any: {'Found' if fetched_reports_json_data['latest_any_for_others'] else 'Not Found'}")
+            logger.debug(f"  Prev Year Same Q: {'Found' if fetched_reports_json_data['prev_year_same_q_for_yoy'] else 'Not Found'}")
+            logger.debug(f"  Past 3Y Annuals Count: {len(fetched_reports_json_data['annual_reports_for_3y_check'])}")
+        except AttributeError as e:
+            logger.error(f"AttrError processing reports from crud ({symbol} @ {signal_date}, type {report_type_db_key}): {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"调用 crud.get_financial_reports_for_analyzer 时出错 ({stock_code} @ {signal_date}): {e}",
-                         exc_info=True)
-            # 在这种情况下，fetched_reports_json_data 将保持其初始的 None/空列表值
-
+            logger.error(f"Error calling crud.get_financial_reports_for_analyzer ({symbol} @ {signal_date}, type {report_type_db_key}): {e}", exc_info=True)
         return fetched_reports_json_data
 
-    def analyze_stock(self, stock_code: str, signal_date: date, current_price: float) -> Dict[str, Any]:
+    def _calculate_pb_ratio(self, symbol: str, market_cap: Optional[float],
+                            balance_sheet_financial_datas: Dict[str, Any],
+                            signal_date: date) -> Optional[float]:
+        """计算市净率 (PB Ratio)"""
+        pb_ratio = np.nan
+        if pd.isna(market_cap) or market_cap is None or market_cap <= 1e-9:
+            logger.debug(f"[{symbol}@{signal_date.isoformat()}] PB计算跳过：市值无效 ({market_cap})。")
+            return np.nan
+
+        # 净资产通常来自最新的资产负债表 (可能是年报或季报)
+        # 我们使用 _fetch_financial_reports 获取的 'latest_any_for_others'，
+        # 假设当 report_type_db_key 指向资产负债表时，这个字段会填充最新的资产负债表数据。
+        latest_balance_sheet_json = balance_sheet_financial_datas.get('latest_any_for_others')
+
+        if not latest_balance_sheet_json:
+            logger.warning(f"[{symbol}@{signal_date.isoformat()}] PB计算失败：未找到最新的资产负债表数据。")
+            return np.nan
+
+        net_assets = self._safe_extract_json_value(latest_balance_sheet_json, EQUITY_FIELD)
+
+        if net_assets is not None and net_assets > 1e-9: # 净资产应为正数才有意义
+            pb_ratio = market_cap / net_assets
+            logger.info(f"[{symbol}@{signal_date.isoformat()}] PB 计算: 市值={market_cap:.2f}, 净资产={net_assets:.2f}, PB={pb_ratio:.4f}")
+            return pb_ratio
+        else:
+            logger.warning(f"[{symbol}@{signal_date.isoformat()}] PB计算失败：净资产无效或非正 ({net_assets})。")
+            if net_assets is not None and net_assets <= 0 and market_cap > 0 : # 市值存在但净资产为0或负
+                 return np.inf if net_assets == 0 else pb_ratio # 如果净资产为0，PB为无穷大；如果为负，PB为负
+            return np.nan
+
+
+    def analyze_stock(self, symbol: str, signal_date: date) -> Dict[str, Any]:
         """
         Performs fundamental analysis for a stock on a given signal date.
+        Price for market cap calculation is fetched internally using signal_date.
         """
         results = {
             'net_profit_positive_3y_latest': None, 'pe': np.nan, 'pe_lt_30': None,
+            'pb': np.nan, 'market_cap': np.nan, # 初始化 pb 和 market_cap
             'revenue_growth_yoy': np.nan, 'profit_growth_yoy': np.nan, 'growth_positive': None,
             'peg_like_ratio': np.nan, 'peg_like_lt_1': None, 'error_reason': None
         }
         error_messages = []
 
-        # 1. Calculate Market Cap
-        total_shares = self._get_total_shares(stock_code, signal_date)  # 使用已更新的 _get_total_shares
+        # --- 修改点 2: 在方法内部获取当前价格 ---
+        current_price: Optional[float] = None
+        # 假设 StockDaily 模型中使用 'symbol' 作为股票代码字段
+        # 并且 crud.get_stock_daily_for_date 的股票代码参数名为 'symbol'
+        daily_data_for_signal_date = crud.get_stock_daily_for_date(
+            self.db_session,
+            symbol=symbol, # 传递给 crud 函数的股票代码参数名
+            trade_date=signal_date
+        )
+        if daily_data_for_signal_date and daily_data_for_signal_date.close is not None: # 使用 .close (根据您的模型)
+            current_price = daily_data_for_signal_date.close
+            logger.info(f"[{symbol}@{signal_date.isoformat()}] 获取到信号日价格: {current_price:.2f}")
+        else:
+            # 尝试获取信号日之前最近一个交易日的价格作为备用
+            logger.warning(f"[{symbol}@{signal_date.isoformat()}] 未找到信号日当天价格，尝试回溯查找...")
+            temp_date = signal_date - timedelta(days=1)
+            for _ in range(7): # 最多回溯7天
+                prev_daily_data = crud.get_stock_daily_for_date(self.db_session, symbol=symbol, trade_date=temp_date)
+                if prev_daily_data and prev_daily_data.close is not None:
+                    current_price = prev_daily_data.close
+                    logger.warning(f"[{symbol}@{signal_date.isoformat()}] 使用回溯日期 {temp_date} 的价格: {current_price:.2f}")
+                    break
+                temp_date -= timedelta(days=1)
+            if current_price is None:
+                error_messages.append(f"信号日 {signal_date} 及之前7天内均无法获取有效价格.")
+                logger.error(f"[{symbol}@{signal_date.isoformat()}] 无法获取有效价格用于分析。")
+        # --- 价格获取结束 ---
+
+        # 1. 获取总股本并计算市值
+        total_shares = self._get_total_shares(symbol, signal_date)
         market_cap = np.nan
-        if total_shares is not None and current_price is not None:
-            if total_shares > 1e-9:  # Ensure total_shares is positive and non-negligible
+        if total_shares is not None and current_price is not None and pd.notna(current_price):
+            if total_shares > 1e-9:
                 market_cap = total_shares * current_price
             else:
                 error_messages.append(f"总股本计算为非正数或过小 ({total_shares}).")
         else:
-            if total_shares is None: error_messages.append(
-                "总股本无法计算 (可能缺少日成交量/换手率数据，或数据无效).")
-            if current_price is None: error_messages.append("当前价格未提供，无法计算市值.")
+            if total_shares is None: error_messages.append("总股本无法从数据库获取或无效.")
+            if current_price is None or pd.isna(current_price): error_messages.append("当前价格未提供或无效，无法计算市值.")
 
         if pd.notna(market_cap):
-            logger.debug(
-                f"[{stock_code}@{signal_date.isoformat()}] Calculated Market Cap: {market_cap:.2f} using Total Shares: {total_shares:.2f} and Price: {current_price:.2f}")
+            logger.debug(f"[{symbol}@{signal_date.isoformat()}] 市值计算: {market_cap:.2f} (总股本: {total_shares:.0f}, 价格: {current_price:.2f})")
         else:
-            logger.debug(
-                f"[{stock_code}@{signal_date.isoformat()}] Market Cap could not be calculated. Total Shares: {total_shares}, Price: {current_price}")
+            logger.debug(f"[{symbol}@{signal_date.isoformat()}] 市值无法计算。总股本: {total_shares}, 价格: {current_price}")
 
-        # 2. Fetch all necessary financial report data
-        financial_datas = self._fetch_financial_reports(stock_code, signal_date,
-                                                        report_type_db_key='benefit')  # 使用已更新的 _fetch_financial_reports
+        # 2. 获取财务报告数据 (利润表相关)
+        # report_type_db_key 应与您在 StockFinancial 表中存储利润表时使用的 report_type 值对应
+        # 常见的可能是 '利润表' 或 'income_statement'，这里使用您提供的 'benefit'
+        income_statement_datas = self._fetch_financial_reports(symbol, signal_date,
+                                                               report_type_db_key='benefit')
+        latest_annual_income_json = income_statement_datas['latest_annual_for_pe']
+        latest_any_income_json = income_statement_datas['latest_any_for_others'] # 用于同比增长的当期利润表
+        prev_year_same_q_income_json = income_statement_datas['prev_year_same_q_for_yoy'] # 用于同比增长的去年同期利润表
+        annual_reports_for_3y_list = income_statement_datas['annual_reports_for_3y_check']
 
-        latest_annual_report_json = financial_datas['latest_annual_for_pe']
-        latest_any_report_json = financial_datas['latest_any_for_others']
-        prev_year_same_q_report_json = financial_datas['prev_year_same_q_for_yoy']
-        annual_reports_for_3y_list = financial_datas['annual_reports_for_3y_check']
 
-        # 3. Calculate PE
-        if pd.notna(market_cap) and latest_annual_report_json:
-            net_profit_for_pe = self._safe_extract_json_value(latest_annual_report_json, NET_PROFIT_FIELD)
-            if net_profit_for_pe is not None and net_profit_for_pe > 1e-6:
-                results['pe'] = market_cap / net_profit_for_pe  # PE calculation
+        # 2.1 获取财务报告数据 (资产负债表相关 - 为 PB 计算)
+        # report_type_db_key 应与您在 StockFinancial 表中存储资产负债表时使用的 report_type 值对应
+        # 常见的可能是 '资产负债表' 或 'balance_sheet'。您需要确认这个键名。
+        # 假设键名为 'balance_sheet' (如果不同，请修改)
+        balance_sheet_datas = self._fetch_financial_reports(symbol, signal_date,
+                                                            report_type_db_key='debt') # <--- 假设的资产负债表类型键
+
+        # 3. 计算 PE
+        if pd.notna(market_cap) and latest_annual_income_json:
+            net_profit_for_pe = self._safe_extract_json_value(latest_annual_income_json, NET_PROFIT_FIELD)
+            if net_profit_for_pe is not None and net_profit_for_pe > 1e-6: # 净利润应为正
+                results['pe'] = market_cap / net_profit_for_pe
                 results['pe_lt_30'] = results['pe'] < PE_THRESHOLD
-                logger.debug(
-                    f"[{stock_code}@{signal_date.isoformat()}] PE Calculated: {results['pe']:.4f} (Market Cap: {market_cap:.2f}, Annual Profit: {net_profit_for_pe:.2f})")
+                logger.debug(f"[{symbol}@{signal_date.isoformat()}] PE 计算: {results['pe']:.4f} (市值: {market_cap:.2f}, 年净利润: {net_profit_for_pe:.2f})")
             else:
-                error_messages.append(
-                    f"PE计算失败：年度净利润无效或非正 ({net_profit_for_pe}).")
-                logger.debug(
-                    f"[{stock_code}@{signal_date.isoformat()}] PE not calculated: Invalid or non-positive annual profit for PE ({net_profit_for_pe}). Latest annual report JSON: {bool(latest_annual_report_json)}")
-
+                error_messages.append(f"PE计算失败：年度净利润无效或非正 ({net_profit_for_pe}).")
         else:
             if pd.isna(market_cap): error_messages.append("PE计算失败：市值是 NaN.")
-            if not latest_annual_report_json: error_messages.append(
-                "PE计算失败：未找到最新的年度报告.")
-            logger.debug(
-                f"[{stock_code}@{signal_date.isoformat()}] PE not calculated: Market cap is NaN ({pd.isna(market_cap)}), Latest annual report found ({bool(latest_annual_report_json)}).")
+            if not latest_annual_income_json: error_messages.append("PE计算失败：未找到最新的年度利润表.")
 
-        # 4. Calculate YoY Growths and Growth Positive
+        # 3.1 计算 PB
+        # 使用上面获取的 balance_sheet_datas
+        pb_value = self._calculate_pb_ratio(symbol, market_cap, balance_sheet_datas, signal_date)
+        results['pb'] = pb_value # pb_value 可能是 np.nan
+
+
+        # 4. 计算同比增长率 (营收、利润) - 使用利润表数据
         rev_growth = np.nan
         prof_growth = np.nan
-        if latest_any_report_json and prev_year_same_q_report_json:
-            current_revenue = self._safe_extract_json_value(latest_any_report_json, REVENUE_FIELD)
-            prev_revenue = self._safe_extract_json_value(prev_year_same_q_report_json, REVENUE_FIELD)
-            current_profit = self._safe_extract_json_value(latest_any_report_json, NET_PROFIT_FIELD)
-            prev_profit = self._safe_extract_json_value(prev_year_same_q_report_json, NET_PROFIT_FIELD)
+        # latest_any_income_json 和 prev_year_same_q_income_json 来自上面对 'benefit' 的调用
+        if latest_any_income_json and prev_year_same_q_income_json:
+            current_revenue = self._safe_extract_json_value(latest_any_income_json, REVENUE_FIELD)
+            prev_revenue = self._safe_extract_json_value(prev_year_same_q_income_json, REVENUE_FIELD)
+            current_profit = self._safe_extract_json_value(latest_any_income_json, NET_PROFIT_FIELD)
+            prev_profit = self._safe_extract_json_value(prev_year_same_q_income_json, NET_PROFIT_FIELD)
 
-            logger.debug(
-                f"[{stock_code}@{signal_date.isoformat()}] YoY Data: CurrRev={current_revenue}, PrevRev={prev_revenue}, CurrProf={current_profit}, PrevProf={prev_profit}")
+            logger.debug(f"[{symbol}@{signal_date.isoformat()}] YoY 数据: CurrRev={current_revenue}, PrevRev={prev_revenue}, CurrProf={current_profit}, PrevProf={prev_profit}")
 
             if current_revenue is not None and prev_revenue is not None:
-                if abs(prev_revenue) > 1e-9:  # Avoid division by zero or near-zero
+                if abs(prev_revenue) > 1e-9:
                     rev_growth = (current_revenue - prev_revenue) / abs(prev_revenue)
                     results['revenue_growth_yoy'] = rev_growth
-                else:
-                    error_messages.append("营收同比增长计算失败：上一期营收接近零.")
-            else:
-                error_messages.append("营收同比增长计算失败：缺少当前或上一期营收数据.")
+                else: error_messages.append("营收同比增长计算失败：上一期营收接近零.")
+            else: error_messages.append("营收同比增长计算失败：缺少当前或上一期营收数据.")
 
             if current_profit is not None and prev_profit is not None:
-                if abs(prev_profit) > 1e-9:  # Avoid division by zero or near-zero
+                if abs(prev_profit) > 1e-9:
                     prof_growth = (current_profit - prev_profit) / abs(prev_profit)
                     results['profit_growth_yoy'] = prof_growth
-                elif current_profit > 1e-9 and (prev_profit is None or abs(
-                        prev_profit) < 1e-9):  # Turned profitable from zero/loss or no prev data
-                    prof_growth = np.inf  # Or a very large number if np.inf is problematic for storage/JSON
+                elif current_profit > 1e-9 and (prev_profit is None or abs(prev_profit) < 1e-9):
+                    prof_growth = np.inf
                     results['profit_growth_yoy'] = prof_growth
-                else:  # handles prev_profit is negative or other cases
-                    error_messages.append(
-                        f"利润同比增长计算失败：无效的利润数据 (当前:{current_profit}, 上一期:{prev_profit}).")
-            else:
-                error_messages.append("利润同比增长计算失败：缺少当前或上一期利润数据.")
+                else: error_messages.append(f"利润同比增长计算失败：无效的利润数据 (当前:{current_profit}, 上一期:{prev_profit}).")
+            else: error_messages.append("利润同比增长计算失败：缺少当前或上一期利润数据.")
 
             if pd.notna(rev_growth) and pd.notna(prof_growth):
-                if np.isinf(prof_growth) and prof_growth > 0:  # Turned profitable
-                    results['growth_positive'] = (
-                                rev_growth > 1e-6)  # Check only revenue growth if profit turned inf positive
-                elif not np.isinf(prof_growth):  # Both are finite numbers
+                if np.isinf(prof_growth) and prof_growth > 0:
+                    results['growth_positive'] = (rev_growth > 1e-6)
+                elif not np.isinf(prof_growth):
                     results['growth_positive'] = (rev_growth > 1e-6) and (prof_growth > 1e-6)
-                # else case: prof_growth is -inf or NaN, growth_positive remains None
-
             if results['growth_positive'] is not None:
-                logger.debug(
-                    f"[{stock_code}@{signal_date.isoformat()}] Growth Positive Check: RevGrowth={rev_growth:.4f}, ProfGrowth={prof_growth:.4f}, Result={results['growth_positive']}")
-
-
+                logger.debug(f"[{symbol}@{signal_date.isoformat()}] Growth Positive Check: RevGrowth={rev_growth:.4f}, ProfGrowth={prof_growth:.4f}, Result={results['growth_positive']}")
         else:
-            error_messages.append("同比增长率计算失败：缺少当期报告或去年同期报告.")
-            logger.debug(
-                f"[{stock_code}@{signal_date.isoformat()}] YoY growths not calculated: Latest any report found ({bool(latest_any_report_json)}), Prev year same Q report found ({bool(prev_year_same_q_report_json)}).")
+            error_messages.append("同比增长率计算失败：缺少当期利润表或去年同期利润表.")
 
-        # 5. Calculate PEG-like Ratio
+
+        # 5. 计算 PEG-like Ratio
         current_pe_val = results.get('pe')
         finite_prof_growth_for_peg = prof_growth if pd.notna(prof_growth) and np.isfinite(prof_growth) else np.nan
-
         if pd.notna(current_pe_val) and pd.notna(finite_prof_growth_for_peg) and finite_prof_growth_for_peg > 1e-6:
             peg_like = current_pe_val / (finite_prof_growth_for_peg * 100.0)
             results['peg_like_ratio'] = peg_like
             results['peg_like_lt_1'] = peg_like < PEG_LIKE_THRESHOLD
-            logger.debug(
-                f"[{stock_code}@{signal_date.isoformat()}] PEG-like Calculated: {peg_like:.4f} (PE: {current_pe_val:.4f}, Finite Profit Growth for PEG: {finite_prof_growth_for_peg:.4f})")
-
+            logger.debug(f"[{symbol}@{signal_date.isoformat()}] PEG-like 计算: {peg_like:.4f} (PE: {current_pe_val:.4f}, 利润增长率: {finite_prof_growth_for_peg:.4f})")
         else:
             if pd.isna(current_pe_val): error_messages.append("PEG近似值计算失败：PE 是 NaN.")
             if not (pd.notna(finite_prof_growth_for_peg) and finite_prof_growth_for_peg > 1e-6):
-                error_messages.append(
-                    f"PEG近似值计算失败：利润增长率无效或非正 ({finite_prof_growth_for_peg}).")
-            logger.debug(
-                f"[{stock_code}@{signal_date.isoformat()}] PEG-like not calculated: PE is NaN ({pd.isna(current_pe_val)}), Finite profit growth for PEG ({finite_prof_growth_for_peg}).")
+                error_messages.append(f"PEG近似值计算失败：利润增长率无效或非正 ({finite_prof_growth_for_peg}).")
 
-        # 6. Calculate Net Profit Positive 3 Years Latest
+        # 6. 计算最近3年净利润是否为正 (Net Profit Positive 3 Years Latest)
+        # 使用 latest_any_income_json (最新的任何类型利润表) 和 annual_reports_for_3y_list (年利润表列表)
         num_annual_reports_for_check = len(annual_reports_for_3y_list)
-        all_checked_profits_positive = True  # Assume true initially
+        all_checked_profits_positive = True
 
-        if latest_any_report_json:
-            latest_profit = self._safe_extract_json_value(latest_any_report_json, NET_PROFIT_FIELD)
+        if latest_any_income_json: # 检查最新一期财报（可能是季报）的利润
+            latest_profit = self._safe_extract_json_value(latest_any_income_json, NET_PROFIT_FIELD)
             if latest_profit is None or latest_profit <= 1e-6:
                 all_checked_profits_positive = False
-                logger.debug(
-                    f"[{stock_code}@{signal_date.isoformat()}] 3Y Profit Check: Latest report profit non-positive ({latest_profit}).")
+                logger.debug(f"[{symbol}@{signal_date.isoformat()}] 3年盈利检查：最新报告期利润非正 ({latest_profit}).")
         else:
-            all_checked_profits_positive = False  # Cannot confirm if latest report is missing
-            error_messages.append("3年盈利检查失败：缺少最新的报告数据.")
-            logger.debug(
-                f"[{stock_code}@{signal_date.isoformat()}] 3Y Profit Check: Missing latest (any type) report data.")
+            all_checked_profits_positive = False
+            error_messages.append("3年盈利检查失败：缺少最新的利润表数据.")
+            logger.debug(f"[{symbol}@{signal_date.isoformat()}] 3年盈利检查：缺少最新利润表数据。")
 
-        if all_checked_profits_positive:  # Only proceed if latest profit was positive
-            if num_annual_reports_for_check < 3:  # Strict: require 3 full past annual reports from the crud function
-                # `get_financial_reports_for_analyzer` tries to get last 3, so this check is on its output
-                results['net_profit_positive_3y_latest'] = None  # Not enough data for a firm True/False
-                error_messages.append(
-                    f"3年盈利检查存疑：找到的年度报告数量不足 ({num_annual_reports_for_check}/3).")
-                logger.debug(
-                    f"[{stock_code}@{signal_date.isoformat()}] 3Y Profit Check: Insufficient annual reports found ({num_annual_reports_for_check}/3) by crud.")
+        if all_checked_profits_positive: # 如果最新一期利润为正，再检查过去几年的年报
+            if num_annual_reports_for_check < 3: # 严格要求3份年报
+                results['net_profit_positive_3y_latest'] = None # 数据不足，无法判断
+                error_messages.append(f"3年盈利检查存疑：年度利润表数量不足 ({num_annual_reports_for_check}/3).")
             else:
-                # Check the annual reports obtained (crud function should give up to 3 most recent relevant ones)
                 annual_profits_log = []
-                for i in range(min(3, num_annual_reports_for_check)):  # Iterate up to 3 or actual count
-                    annual_report_json_data = annual_reports_for_3y_list[i]  # crud already sorted them desc
+                for i in range(min(3, num_annual_reports_for_check)):
+                    annual_report_json_data = annual_reports_for_3y_list[i]
                     annual_profit = self._safe_extract_json_value(annual_report_json_data, NET_PROFIT_FIELD)
                     annual_profits_log.append(annual_profit)
                     if annual_profit is None or annual_profit <= 1e-6:
                         all_checked_profits_positive = False
                         break
                 results['net_profit_positive_3y_latest'] = all_checked_profits_positive
-                logger.debug(
-                    f"[{stock_code}@{signal_date.isoformat()}] 3Y Profit Check: Annual profits checked: {annual_profits_log}. Result: {results['net_profit_positive_3y_latest']}")
-        else:  # If latest profit was already non-positive or missing
-            results['net_profit_positive_3y_latest'] = False  # Cannot be true if latest is bad or missing
-            if not latest_any_report_json:  # If it was false due to missing latest report
-                logger.debug(
-                    f"[{stock_code}@{signal_date.isoformat()}] 3Y Profit Check: Set to False due to missing latest report, annuals not checked further for this flag.")
-            else:  # If it was false due to latest report profit being non-positive
-                logger.debug(
-                    f"[{stock_code}@{signal_date.isoformat()}] 3Y Profit Check: Set to False due to non-positive latest report profit, annuals not checked further for this flag.")
+                logger.debug(f"[{symbol}@{signal_date.isoformat()}] 3年盈利检查：年利润检查: {annual_profits_log}. 结果: {results['net_profit_positive_3y_latest']}")
+        else: # 如果最新一期利润已非正或缺失
+            results['net_profit_positive_3y_latest'] = False
+
 
         if error_messages:
-            results['error_reason'] = "; ".join(sorted(list(set(error_messages))))  # Unique sorted errors
-            logger.debug(
-                f"[{stock_code}@{signal_date.isoformat()}] Fundamental analysis errors: {results['error_reason']}")
+            results['error_reason'] = "; ".join(sorted(list(set(error_messages))))
+            logger.debug(f"[{symbol}@{signal_date.isoformat()}] 基本面分析错误: {results['error_reason']}")
 
-        # Round relevant float results for cleaner output
-        for key in ['pe', 'revenue_growth_yoy', 'profit_growth_yoy', 'peg_like_ratio']:
-            if key in results and pd.notna(results[key]):
+        results['market_cap'] = market_cap  # 确保在任何可能的分支后，results['market_cap'] 都被赋予计算出的 market_cap 值
+
+        # Round relevant float results
+        for key in ['pe', 'pb', 'market_cap', 'revenue_growth_yoy', 'profit_growth_yoy',
+                    'peg_like_ratio']:  # <-- *** 修正点：加入 'market_cap' ***
+            if key in results and pd.notna(results[key]):  # pd.notna 会正确处理 np.nan
                 if np.isinf(results[key]):
-                    results[key] = str(results[key])  # Store "inf" or "-inf" as string
-                elif np.isfinite(results[key]):
-                    results[key] = round(results[key], 4)
-                # else NaN remains NaN, which is fine for JSON (becomes null)
-
+                    results[key] = str(results[key])  # 将 Inf 转为字符串 "inf" 或 "-inf"
+                elif np.isfinite(results[key]):  # 确保是有限的浮点数才进行 round
+                    results[key] = round(results[key], 4)  # 对 market_cap 也保留4位小数，或按需调整
+                # else NaN (pd.notna(results[key]) is False) remains np.nan, NpAndDateEncoder 会处理为 null
         return results
 
 
+# if __name__ == '__main__': 测试代码块保持不变 (来自您提供的版本)
+# ... (您的 __main__ 测试代码块) ...
 if __name__ == '__main__':
     import logging
     import json
-    from datetime import date, datetime # 确保 datetime 也导入了
-    import numpy as np
-    import pandas as pd
+    # from datetime import date, datetime, timedelta # 确保 timedelta 也导入了 (已在顶部导入)
+    # import numpy as np # 已在顶部导入
+    # import pandas as pd # 已在顶部导入
 
-    # --- 配置日志 ---
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    logger = logging.getLogger(__name__) # 为 main 代码块定义 logger
+    logger_main = logging.getLogger(__name__) # 为 main 代码块定义 logger
 
-    # --- 从项目中导入实际模块 ---
-    # 确保 Python 解释器可以找到这些模块
-    # 这通常需要从项目的根目录运行，或者设置 PYTHONPATH
-    from db.database import get_db_session #
-    # FundamentalAnalyzer 内部会导入 db.crud 和 data_processing.loader
+    from db.database import get_db_session # 确保路径正确
+    # FundamentalAnalyzer 内部会导入 db.crud
 
-    logger.info("--- 开始 FundamentalAnalyzer 针对 603920 的真实数据测试 ---")
+    logger_main.info("--- 开始 FundamentalAnalyzer 针对特定股票的真实数据测试 (使用 get_stock_daily_data_period 获取价格) ---")
 
-    # 1. 获取数据库会话
-    # 使用 context manager 来确保会话正确关闭
     db_sess = None
     try:
         with get_db_session() as session:
             if session is None:
-                logger.error("未能获取数据库会话，测试中止。请检查数据库配置和连接。")
+                logger_main.error("未能获取数据库会话，测试中止。请检查数据库配置和连接。")
                 exit(1)
             db_sess = session
 
-            # 2. 实例化 FundamentalAnalyzer
             analyzer = FundamentalAnalyzer(db_session=db_sess)
 
-            stock_to_test = "603920"
-            test_signal_date = date(2025, 5, 23)
-            test_current_price = 26.00
+            stock_to_test = "000001"
+            test_signal_date = date(2025, 5, 30)
+            test_current_price = None
 
-            # 3. 测试 analyze_stock 方法
-            logger.info(f"\n--- 测试 analyze_stock: 股票代码 {stock_to_test}, 日期 {test_signal_date}, 价格 {test_current_price} ---")
-            analysis_results = analyzer.analyze_stock(
-                stock_code=stock_to_test,
-                signal_date=test_signal_date,
-                current_price=test_current_price
+            start_date_for_price_fetch = test_signal_date - timedelta(days=7)
+            logger_main.info(f"为股票 {stock_to_test} 从 {start_date_for_price_fetch} 到 {test_signal_date} 获取日线数据以确定当前价格...")
+
+            daily_data_df = crud.get_stock_daily_data_period(
+                db=db_sess,
+                symbol=stock_to_test,
+                start_date=start_date_for_price_fetch,
+                end_date=test_signal_date
             )
 
-            # 自定义 JSON 编码器以处理 numpy 类型和日期，用于美化打印
-            class NpAndDateEncoder(json.JSONEncoder):
-                def default(self, obj):
-                    if isinstance(obj, np.integer):
-                        return int(obj)
-                    if isinstance(obj, np.floating):
-                        if np.isnan(obj): return None
-                        if np.isinf(obj): return str(obj)
-                        return float(obj)
-                    if isinstance(obj, np.ndarray):
-                        return obj.tolist()
-                    if isinstance(obj, (datetime, date)): # 处理 date/datetime 对象
-                        return obj.isoformat()
-                    if pd.isna(obj):
-                        return None
-                    return super(NpAndDateEncoder, self).default(obj)
+            if daily_data_df is not None and not daily_data_df.empty:
+                if not pd.api.types.is_datetime64_any_dtype(daily_data_df['date']):
+                    try:
+                        daily_data_df['date'] = pd.to_datetime(daily_data_df['date']).dt.date
+                    except Exception as e_date_conv:
+                        logger_main.error(f"DataFrame 中的 'date' 列无法转换为日期对象: {e_date_conv}")
+                        daily_data_df = None
 
-            results_str = json.dumps(analysis_results, indent=4, ensure_ascii=False, cls=NpAndDateEncoder)
-            print("\n分析结果:")
-            print(results_str)
+                if daily_data_df is not None:
+                    signal_day_data = daily_data_df[daily_data_df['date'] == test_signal_date]
+                    if not signal_day_data.empty:
+                        if 'close' in signal_day_data.columns: # 使用 'close'
+                            test_current_price = signal_day_data['close'].iloc[0]
+                            logger_main.info(f"在 {test_signal_date} 找到收盘价: {test_current_price}")
+                        else:
+                            logger_main.warning(f"DataFrame 中未找到 'close' 列。列名: {daily_data_df.columns.tolist()}")
+                    else:
+                        daily_data_df_sorted = daily_data_df.sort_values(by='date', ascending=False)
+                        if not daily_data_df_sorted.empty:
+                            if 'close' in daily_data_df_sorted.columns: # 使用 'close'
+                                latest_available_date = daily_data_df_sorted['date'].iloc[0]
+                                test_current_price = daily_data_df_sorted['close'].iloc[0]
+                                logger_main.warning(f"信号日 {test_signal_date} 无数据，使用最近可用日期 {latest_available_date} 的收盘价: {test_current_price}")
+                            else:
+                                logger_main.warning(f"DataFrame 中未找到 'close' 列 (回溯查找时)。列名: {daily_data_df.columns.tolist()}")
+                        else:
+                            logger_main.warning(f"在 {start_date_for_price_fetch} 到 {test_signal_date} 期间未找到 {stock_to_test} 的任何日线数据。")
+            else:
+                logger_main.warning(f"未能从 crud.get_stock_daily_data_period 获取 {stock_to_test} 的日线数据。")
 
-            if analysis_results.get('error_reason'):
-                logger.warning(f"股票 {stock_to_test} 的错误原因: {analysis_results.get('error_reason')}")
 
-            # 根据您的实际数据和预期，您可以在这里添加断言
-            # 例如:
-            # if 'pe' in analysis_results and not pd.isna(analysis_results['pe']):
-            #     assert 0 < analysis_results['pe'] < 100, f"PE值异常: {analysis_results['pe']}"
+            if test_current_price is None:
+                logger_main.error(f"未能为股票 {stock_to_test} 在日期 {test_signal_date} 附近确定测试价格，中止对该股票的 analyze_stock 测试。")
+            else:
+                logger_main.info(f"\n--- 测试 analyze_stock: 股票代码 {stock_to_test}, 日期 {test_signal_date}, 获取到的价格 {float(test_current_price):.2f} ---")
+                analysis_results = analyzer.analyze_stock(
+                    symbol=stock_to_test,
+                    signal_date=test_signal_date,
+
+                )
+
+                class NpAndDateEncoder(json.JSONEncoder):
+                    def default(self, obj):
+                        if isinstance(obj, np.integer): return int(obj)
+                        if isinstance(obj, np.floating):
+                            if np.isnan(obj): return None
+                            if np.isinf(obj): return str(obj)
+                            return float(obj)
+                        if isinstance(obj, np.ndarray): return obj.tolist()
+                        if isinstance(obj, (datetime, date)): return obj.isoformat()
+                        if pd.isna(obj): return None
+                        return super(NpAndDateEncoder, self).default(obj)
+
+                results_str = json.dumps(analysis_results, indent=4, ensure_ascii=False, cls=NpAndDateEncoder)
+                print("\n分析结果:")
+                print(results_str)
+
+                if analysis_results.get('error_reason'):
+                    logger_main.warning(f"股票 {stock_to_test} 的错误原因: {analysis_results.get('error_reason')}")
 
     except Exception as e:
-        logger.error(f"运行 FundamentalAnalyzer 测试时发生严重错误: {e}", exc_info=True)
+        logger_main.error(f"运行 FundamentalAnalyzer 测试时发生严重错误: {e}", exc_info=True)
     finally:
-        logger.info("\n--- FundamentalAnalyzer 真实数据测试结束 ---")
+        logger_main.info("\n--- FundamentalAnalyzer 真实数据测试结束 ---")

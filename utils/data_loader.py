@@ -304,7 +304,7 @@ def load_weekly_data(
         sql_query = text(f"""
           SELECT {selected_fields} 
           FROM {table_name}
-          WHERE stock_code = :symbol  -- 注意：新表中 stock_code 而非 symbol
+          WHERE symbol = :symbol  -- 注意：新表中 symbol 而非 symbol
           ORDER BY date DESC
           LIMIT :limit
         """)
@@ -327,7 +327,7 @@ def load_weekly_data(
         logger.info(f"Loading weekly data for {symbol} from {start_date} to {end_date} from {table_name}.")
         sql_query = text(f"""
             SELECT {selected_fields} FROM {table_name}
-            WHERE stock_code = :symbol -- 注意：新表中 stock_code 而非 symbol
+            WHERE symbol = :symbol -- 注意：新表中 symbol 而非 symbol
             AND date BETWEEN :start_date AND :end_date
             ORDER BY date
         """)
@@ -386,7 +386,7 @@ def load_monthly_data(
         sql_query = text(f"""
           SELECT {selected_fields} 
           FROM {table_name}
-          WHERE stock_code = :symbol -- 注意：新表中 stock_code 而非 symbol
+          WHERE symbol = :symbol -- 注意：新表中 symbol 而非 symbol
           ORDER BY date DESC
           LIMIT :limit
         """)
@@ -409,7 +409,7 @@ def load_monthly_data(
         logger.info(f"Loading monthly data for {symbol} from {start_date} to {end_date} from {table_name}.")
         sql_query = text(f"""
             SELECT {selected_fields} FROM {table_name}
-            WHERE stock_code = :symbol -- 注意：新表中 stock_code 而非 symbol
+            WHERE symbol = :symbol -- 注意：新表中 symbol 而非 symbol
             AND date BETWEEN :start_date AND :end_date
             ORDER BY date
         """)
