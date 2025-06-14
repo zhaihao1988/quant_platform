@@ -118,7 +118,11 @@ def populate_raw_content_for_stock(db: Session, stock_symbol: str):
             continue
 
         try:
-            content = scraper.fetch_announcement_text(disclosure_obj.url, disclosure_obj.title)
+            content = scraper.fetch_announcement_text(
+                detail_url=disclosure_obj.url,
+                title=disclosure_obj.title,
+                tag=disclosure_obj.tag  # <--- 新增传递 tag 参数
+            )
 
             if content:
                 logger.debug(f"成功抓取公告 ID {disclosure_obj.id} 的内容，长度: {len(content)}。")

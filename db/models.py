@@ -60,6 +60,10 @@ class StockWeekly(Base):
     low = Column(Float, nullable=True)
     close = Column(Float, nullable=True)
     volume = Column(Float, nullable=True)  # 成交量，根据您的数据源可能是Integer或Float
+    amount = Column(Float, nullable=True)
+    amplitude = Column(Float, nullable=True)
+    pct_change = Column(Float, nullable=True)
+    price_change = Column(Float, nullable=True)
     turnover = Column(Float, nullable=True)  # 成交额，字段名与 StockDaily 一致
     __table_args__ = (
         Index('idx_stock_weekly_stock_date', 'symbol', 'date', unique=True),
@@ -76,6 +80,10 @@ class StockMonthly(Base):
     low = Column(Float, nullable=True)
     close = Column(Float, nullable=True)
     volume = Column(Float, nullable=True)  # 成交量
+    amount = Column(Float, nullable=True)
+    amplitude = Column(Float, nullable=True)
+    pct_change = Column(Float, nullable=True)
+    price_change = Column(Float, nullable=True)
     turnover = Column(Float, nullable=True)  # 成交额
     # pct_chg = Column(Float, nullable=True) # 月涨跌幅
     __table_args__ = (
@@ -105,7 +113,7 @@ class StockDisclosure(Base): # 上市公司公告元数据
     url = Column(String(500), nullable=False, unique=True) # 公告URL通常是唯一的
     raw_content = Column(Text, nullable=True) # 全文，用于后续chunk处理
     # content_vector = Column(Vector(settings.EMBEDDING_DIM), nullable=True) # 已移至 StockDisclosureChunk
-
+    tag = Column(String(50), nullable=True, index=True)
 class StockDisclosureChunk(Base): # 公告文本分块及向量化
     __tablename__ = "stock_disclosure_chunk"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -114,7 +122,7 @@ class StockDisclosureChunk(Base): # 公告文本分块及向量化
     chunk_text = Column(Text, nullable=False)
     chunk_vector = Column(Vector(settings.EMBEDDING_DIM), nullable=True)
     disclosure = relationship("StockDisclosure")
-
+    disclosure_ann_date = Column(Date, index=True, nullable=False )
     # __table_args__ 用于定义复合索引、唯一约束等
     # 尝试在这里定义 HNSW 索引 (需要 pgvector 和 SQLAlchemy 支持)
     __table_args__ = (

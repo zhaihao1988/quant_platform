@@ -1,0 +1,45 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Output and data directories
+/output/
+/data_processing/output/
+/data_processing/reports/
+/data_processing/*.txt
+/data_processing/*.json
+/analysis/reports/
+/backtest/reports/
+/backtest/backtest_results_backtrader/
+/scripts/output/
+/scripts/reports/
+/strategies/output/
+/tests/output/
+/tests/output_test/
+/utils/output/
+/db/reports/
+
+# Environment
+.venv/
+.env
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+
+# CSV and Log files
+*.csv
+*.log
+log.txt
+result.txt
+
+# Docs
+*.docx
+*.pdf
+
+# Other
+stealth.min.js
+*.whl
+tests/测试.txt 

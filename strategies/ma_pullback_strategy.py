@@ -718,102 +718,98 @@ class AdaptedMAPullbackStrategy(BaseStrategy):
 
 
 if __name__ == "__main__":
+    # --- 1. 配置日志和测试参数 ---
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.DEBUG, # 设置为DEBUG可以看到策略内部更详细的日志
         format='%(asctime)s - %(levelname)s - %(name)s - [%(funcName)s:%(lineno)d] - %(message)s',
         handlers=[logging.StreamHandler()]
     )
     test_logger = logging.getLogger(__name__ + "_test_main")
 
-    csv_file_path = 'stock_daily.csv'
-    stock_to_test = "000659"
-    date_to_test_str = "2025-05-09"  # Target date for signal generation
+    # --- 测试参数 ---
+    stock_to_test = "000026" # 您想要测试的股票代码
+    date_to_test_str = "2025-06-06" # 您想要测试的日期
 
     target_date = datetime.strptime(date_to_test_str, "%Y-%m-%d").date()
 
+    # --- 2. 从数据库获取数据 ---
+    # 确保您的 db/database.py 中数据库连接配置是正确的
     try:
-        test_logger.info(f"Loading data from: {csv_file_path}")
-        try:
-            daily_df_full = pd.read_csv(csv_file_path, thousands=',', dtype={'symbol': str})
-            test_logger.info(f"CSV columns: {daily_df_full.columns.tolist()}")
-        except FileNotFoundError:
-            test_logger.error(f"CSV file not found at {csv_file_path}. Please check the path and filename.")
-            exit()
-        except Exception as e:
-            test_logger.error(f"Error loading CSV: {e}")
-            exit()
+        from db.database import get_engine_instance
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy import text
 
-        test_logger.info(f"Loaded {len(daily_df_full)} total rows from CSV.")
-        daily_df_stock = daily_df_full[daily_df_full['symbol'] == stock_to_test].copy()
-        if daily_df_stock.empty:
-            test_logger.error(f"No data found for stock {stock_to_test} in the CSV.")
+        engine = get_engine_instance()
+        Session = sessionmaker(bind=engine)
+        db_session = Session()
+        test_logger.info("数据库连接创建成功。")
+    except Exception as e:
+        test_logger.error(f"数据库连接失败，请检查您的 db/database.py 配置: {e}")
+        exit()
+
+    try:
+        # --- 获取日线数据 ---
+        test_logger.info(f"正在从数据库为股票 {stock_to_test} 获取日线数据...")
+        daily_sql = text("SELECT * FROM stock_daily WHERE symbol = :symbol ORDER BY date")
+        daily_df = pd.read_sql(daily_sql, db_session.bind, params={"symbol": stock_to_test})
+        if daily_df.empty:
+            test_logger.error(f"数据库中未找到股票 {stock_to_test} 的日线数据。")
             exit()
-        test_logger.info(f"Found {len(daily_df_stock)} rows for stock {stock_to_test}.")
+        test_logger.info(f"成功获取 {len(daily_df)} 条日线数据。")
 
-        try:
-            daily_df_stock['date'] = pd.to_datetime(daily_df_stock['date'])
-        except Exception as e:
-            test_logger.error(
-                f"Error converting 'date' column to datetime for stock {stock_to_test}: {e}. Ensure date format is consistent.")
-            exit()
-
-        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-        for col in numeric_cols:
-            daily_df_stock[col] = pd.to_numeric(daily_df_stock[col], errors='coerce')
-        daily_df_stock.dropna(subset=numeric_cols, inplace=True)
-        daily_df_stock.sort_values(by='date', inplace=True)
-        daily_df_stock.reset_index(drop=True, inplace=True)
-        test_logger.info(f"Preprocessed daily data for {stock_to_test}. Rows after cleaning: {len(daily_df_stock)}")
-
-        if len(daily_df_stock) > 0:
-            min_date_in_csv = daily_df_stock['date'].dt.date.min()
-            max_date_in_csv = daily_df_stock['date'].dt.date.max()
-            test_logger.debug(
-                f"Date range for selected stock {stock_to_test} in CSV: {min_date_in_csv} to {max_date_in_csv}")
-            if target_date < min_date_in_csv or target_date > max_date_in_csv:
-                test_logger.warning(
-                    f"Target date {target_date} is outside the CSV data range for {stock_to_test} ({min_date_in_csv} to {max_date_in_csv}).")
-            if target_date < min_date_in_csv:
-                test_logger.error("Target date is before the first date in CSV. Cannot test.")
-                exit()
+        # --- 获取周线数据 ---
+        test_logger.info(f"正在从数据库为股票 {stock_to_test} 获取周线数据...")
+        weekly_sql = text("SELECT * FROM stock_weekly WHERE symbol = :symbol ORDER BY date")
+        weekly_df = pd.read_sql(weekly_sql, db_session.bind, params={"symbol": stock_to_test})
+        if weekly_df.empty:
+            test_logger.warning(f"数据库中未找到股票 {stock_to_test} 的周线数据，部分依赖周线的条件可能失效。")
         else:
-            test_logger.error(f"No daily data remaining for {stock_to_test} after preprocessing. Check data quality.")
-            exit()
+            test_logger.info(f"成功获取 {len(weekly_df)} 条周线数据。")
 
-        daily_df_stock_for_strategy = daily_df_stock.copy()
-        # Convert to python date objects for strategy, AFTER all pd.to_datetime and .dt operations
-        daily_df_stock_for_strategy['date'] = daily_df_stock_for_strategy['date'].dt.date
+        # --- 3. 数据预处理 (与之前类似，但现在处理的是从数据库来的数据) ---
+        for df in [daily_df, weekly_df]:
+            if not df.empty:
+                df['date'] = pd.to_datetime(df['date']) # 先统一转为pandas的datetime
+                numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+                for col in numeric_cols:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                df.dropna(subset=['close'], inplace=True)
+                df.sort_values(by='date', inplace=True)
+                df.reset_index(drop=True, inplace=True)
+                # 最后再转为python的date对象，以符合策略函数入参要求
+                df['date'] = df['date'].dt.date
 
-        daily_df_for_weekly_resample = daily_df_stock.set_index(pd.DatetimeIndex(daily_df_stock['date'])).copy()
-        agg_dict = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum', 'symbol': 'first'}
-        weekly_df_stock = daily_df_for_weekly_resample.resample('W-FRI', label='right', closed='right').agg(agg_dict)
-        weekly_df_stock.dropna(subset=['close'], inplace=True)
-        weekly_df_stock.reset_index(inplace=True)
-        weekly_df_stock['date'] = weekly_df_stock['date'].dt.date
-        test_logger.info(f"Generated {len(weekly_df_stock)} weekly data rows for {stock_to_test}.")
-
-        strategy_context = StrategyContext(current_date=target_date, strategy_params={
-            "AdaptedMAPullbackStrategy": {}
-        })
+        # --- 4. 运行策略 ---
+        strategy_context = StrategyContext(
+            db_session=db_session, # 传递数据库会话
+            current_date=target_date,
+            strategy_params={"AdaptedMAPullbackStrategy": {}} # 在此可覆盖默认参数
+        )
         strategy_instance = AdaptedMAPullbackStrategy(context=strategy_context)
-        test_logger.info(
-            f"Strategy params being used for {strategy_instance.strategy_name}: {strategy_instance.params}")
+        test_logger.info(f"策略参数: {strategy_instance.params}")
 
-        data_for_strategy = {"daily": daily_df_stock_for_strategy, "weekly": weekly_df_stock}
+        data_for_strategy = {"daily": daily_df, "weekly": weekly_df}
 
-        test_logger.info(f"Running strategy for {stock_to_test} on {target_date.isoformat()}...")
+        test_logger.info(f"开始为股票 {stock_to_test} 在日期 {target_date.isoformat()} 运行策略...")
         signals = strategy_instance.run_for_stock(
             symbol=stock_to_test,
             current_date=target_date,
             data=data_for_strategy
         )
 
+        # --- 5. 显示结果 ---
         if signals:
-            test_logger.info(f"--- Signals for {stock_to_test} on {target_date.isoformat()} ---")
+            test_logger.info(f"--- 策略信号 for {stock_to_test} on {target_date.isoformat()} ---")
             for signal_idx, signal in enumerate(signals):
-                test_logger.info(f"Signal {signal_idx + 1}: {signal}")
+                test_logger.info(f"信号 {signal_idx + 1}: {signal}")
         else:
-            test_logger.info(f"No BUY signals generated for {stock_to_test} on {target_date.isoformat()}.")
+            test_logger.info(f"在日期 {target_date.isoformat()}，股票 {stock_to_test} 未产生买入信号。")
 
     except Exception as e:
-        test_logger.error(f"An error occurred during the test run: {e}", exc_info=True)
+        test_logger.error(f"测试运行时发生错误: {e}", exc_info=True)
+    finally:
+        # 确保数据库会话被关闭
+        if 'db_session' in locals() and db_session:
+            db_session.close()
+            test_logger.info("数据库连接已关闭。")

@@ -1,0 +1,188 @@
+﻿股票代码,股票简称,信号日期,信号来源,信号级别,net_profit_positive_3y_latest,pe,pe_lt_30,revenue_growth_yoy,profit_growth_yoy,growth_positive,peg_like_ratio,peg_like_lt_1,error_reason
+000525,ST红太阳,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,False,18.0535,True,0.0024,0.4574,True,0.3947,True,
+000722,湖南发展,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,93.8044,False,-0.3420,-0.8352,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.8351935029290393).
+000767,晋控电力,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,273.6964,False,-0.1323,1.1195,False,2.4447,False,
+000790,华神科技,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,-0.2905,-7.4007,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-7.400736906746205).; PE计算失败：年度净利润无效或非正 (-6690200.0).
+000881,中广核技,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,-0.1901,0.0020,False,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-362000000.0).
+000966,长源电力,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,19.8774,True,-0.2116,-1.2943,False,,,PEG近似值计算失败：利润增长率无效或非正 (-1.2942668).
+001255,博菲电气,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,45.0232,False,0.3097,4.5538,True,0.0989,True,
+001316,润贝航科,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,13.2085,True,0.2143,0.6791,True,0.1945,True,
+001328,登康口腔,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,13.2741,True,0.1911,0.1564,True,0.8487,True,
+002009,天奇股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.0431,17.0145,False,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-254999999.99999997).
+002074,国轩高科,2025-05-27,ChanBreakoutStrategyV8,Daily,True,37.0889,False,0.2060,0.4608,True,0.8048,True,
+002094,青岛金王,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,176.9621,False,-0.0242,-0.0523,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.05229013430536571).
+002121,科陆电子,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,0.1628,8.5744,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-463999999.99999994).
+002144,宏达高科,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,57.1725,False,0.0165,-0.0173,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.017272722187728982).
+002217,*ST合泰,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,False,8.1226,True,0.0861,1.0106,True,0.0804,True,
+002224,三 力 士,2025-05-27,ChanBreakoutStrategyV8,Daily,True,117.6550,False,0.3529,2.5654,True,0.4586,True,
+002258,利尔化学,2025-05-27,ChanBreakoutStrategyV8,Daily,True,43.0248,False,0.4996,2.1980,True,0.1957,True,
+002284,亚太股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,39.8481,False,0.2309,0.6504,True,0.6127,True,
+002297,博云新材,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,0.5000,-0.9441,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-0.9440911107824287).; PE计算失败：年度净利润无效或非正 (-67229800.0).
+002312,川发龙蟒,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,True,38.3804,False,0.2464,-0.0096,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.009615384615384616).
+002338,奥普光电,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,158.0083,False,-0.0349,-0.1931,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.19310501936365695).
+002379,宏创控股,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.0481,-1.5960,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-1.5960227378276461).; PE计算失败：年度净利润无效或非正 (-68981800.0).
+002383,合众思壮,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,0.2509,1.0807,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-222000000.00000003).
+002391,长青股份,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,0.0698,1.1117,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-120000000.0).
+002392,北京利尔,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,21.7608,True,0.1053,0.4879,True,0.4460,True,
+002413,雷科防务,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.1008,-0.1755,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-0.17545248760428206).; PE计算失败：年度净利润无效或非正 (-396000000.0).
+002470,金正大,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,False,93.9554,False,0.1967,-0.6726,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.6725851982162583).
+002551,尚荣医疗,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,102.8551,False,0.0145,0.0058,True,176.9503,False,
+002564,天沃科技,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,199.2917,False,-0.0412,0.2383,False,8.3630,False,
+002586,*ST围海,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.0744,1.0587,False,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-151000000.0).
+002598,山东章鼓,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,42.7743,False,0.0262,-0.2984,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.29841556411845543).
+002608,江苏国信,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,True,8.8018,True,-0.1455,0.1091,False,0.8067,True,
+002616,长青集团,2025-05-27,ChanBreakoutStrategyV8,Daily,True,13.5022,True,-0.0332,0.4474,False,0.3018,True,
+002689,远大智能,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,223.3185,False,-0.3144,0.1902,False,11.7416,False,
+002713,*ST东易,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,False,,,-0.6205,0.8371,False,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-1171000000.0).
+002722,物产金轮,2025-05-27,ChanBreakoutStrategyV8,Daily,True,17.7048,True,-0.1600,-0.0743,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.07432575487321379).
+002819,东方中科,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.0596,-0.2197,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-0.2197196314430444).; PE计算失败：年度净利润无效或非正 (-209000000.0).
+002825,纳尔股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,22.0243,True,0.2450,2.0141,True,0.1093,True,
+002836,新宏泽,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,32.9912,False,0.4900,0.5117,True,0.6447,True,
+002842,翔鹭钨业,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,0.0411,1.4004,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-89502700.0).
+002847,盐津铺子,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,33.7234,False,0.2567,0.1125,True,2.9976,False,
+002860,星帅尔,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,30.1227,False,0.0841,0.2173,True,1.3861,False,
+002879,长缆科技,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,True,28.5026,True,0.3586,-0.8488,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.8488020083434858).
+002909,集泰股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,125.4403,False,0.0746,0.4596,True,2.7294,False,
+002963,豪尔赛,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.6004,-5.1782,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-5.178185684705355).; PE计算失败：年度净利润无效或非正 (-179000000.0).
+002973,侨银股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,9.4353,True,-0.0429,-0.2973,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.2973115976980906).
+002981,朝阳科技,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,25.1365,True,0.3930,1.4523,True,0.1731,True,
+003003,天元股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,23.1947,True,-0.2774,-0.1619,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.16187574281652722).
+003006,百亚股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,47.0945,False,0.3007,0.2718,True,1.7324,False,
+003017,大洋生物,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,26.6550,True,0.2769,0.7344,True,0.3629,True,
+300022,吉峰科技,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,0.1052,0.6649,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-30812800.000000004).
+300040,九洲集团,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.0314,-0.0548,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-0.05476851236373305).; PE计算失败：年度净利润无效或非正 (-545000000.0).
+300047,天源迪科,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,344.1662,False,0.4258,0.4532,True,7.5942,False,
+300075,数字政通,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,False,,,-0.3810,-0.8779,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-0.877874531487407).; PE计算失败：年度净利润无效或非正 (-396000000.0).
+300158,振东制药,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,-0.0345,-0.9499,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-0.9499082314644873).; PE计算失败：年度净利润无效或非正 (-1329000000.0).
+300209,*ST有树,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,49.3659,False,-0.8094,1.0580,False,0.4666,True,
+300313,*ST天山,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,0.4050,0.3119,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-65947900.0).
+300322,硕贝德,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,0.4192,2.7605,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-64459000.0).
+300368,ST汇金,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.6243,0.0936,False,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-270000000.0).
+300422,博世科,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,-0.5847,-1.1564,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-1.1564393269441189).; PE计算失败：年度净利润无效或非正 (-865000000.0).
+300438,鹏辉能源,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,False,,,0.0582,-3.7501,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-3.750099346453179).; PE计算失败：年度净利润无效或非正 (-252000000.0).
+300455,航天智装,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,True,133.7288,False,-0.1863,-0.4628,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.4627603319232021).
+300497,富祥药业,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,-0.3118,0.5245,False,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-272000000.0).
+300510,金冠股份,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,0.4462,0.5442,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-333000000.0).
+300531,优博讯,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,0.1101,10.4617,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-150000000.0).
+300532,今天国际,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,True,18.1896,True,-0.0832,-0.2869,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.28687308036383713).
+300534,陇神戎发,2025-05-27,ChanBreakoutStrategyV8,Daily,True,124.6521,False,0.1333,0.0918,True,13.5765,False,
+300575,中旗股份,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,False,208.1791,False,0.1652,-2.4505,False,,,PEG近似值计算失败：利润增长率无效或非正 (-2.450452273509116).
+300758,七彩化学,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,44.7888,False,0.1300,0.4256,True,1.0523,False,
+300796,贝斯美,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,False,,,0.1949,0.2910,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-32864600.0).
+300796,贝斯美,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,0.1949,0.2910,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-32864600.0).
+300804,广康生化,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,22.7215,True,0.0506,-0.0317,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.0317368692099172).
+300824,北鼎股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,55.1016,False,0.3396,0.4771,True,1.1550,False,
+300884,狄耐克,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.0952,-3.5167,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-3.516665119301829).; PE计算失败：年度净利润无效或非正 (-12887600.0).
+300911,亿田智能,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,240.4207,False,-0.5466,-10.4201,False,,,PEG近似值计算失败：利润增长率无效或非正 (-10.420092332840008).
+300918,南山智尚,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,47.5412,False,0.0084,0.0086,True,55.2391,False,
+300923,研奥股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,42.6293,False,0.2189,0.1725,True,2.4719,False,
+300947,德必集团,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,93.3536,False,-0.0447,-0.7727,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.772677867850188).
+300994,久祺股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,15.5881,True,0.3043,0.9001,True,0.1732,True,
+300995,奇德新材,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,252.0566,False,0.2422,0.1716,True,14.6867,False,
+301002,崧盛股份,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,0.1038,-1.0060,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-1.0060134003350083).; PE计算失败：年度净利润无效或非正 (-13892900.0).
+301008,宏昌科技,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,46.4027,False,0.2329,-0.2607,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.26074910591983347).
+301035,润丰股份,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,True,34.6601,False,-0.0026,0.6797,False,0.5099,True,
+301057,汇隆新材,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,44.7737,False,0.2357,0.4460,True,1.0039,False,
+301066,万事利,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,89.7284,False,0.0920,-0.1295,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.1294521331350795).
+301088,戎美股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,25.2119,True,-0.1722,-0.2232,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.22321497253803904).
+301093,华兰股份,2025-05-27,ChanBreakoutStrategyV8,Daily,True,82.1354,False,0.1496,0.7210,True,1.1392,False,
+301096,百诚医药,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,-0.4028,-1.5259,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-1.5258640416554592).; PE计算失败：年度净利润无效或非正 (-52742800.0).
+301110,青木科技,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,True,27.2261,True,0.2124,-0.5856,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.5855958360571631).
+301120,新特电气,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,0.1998,1.1287,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-48511600.0).
+301190,善水科技,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,35.8198,False,0.2308,-0.0972,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.09717939196280091).
+301212,联盛化学,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,153.3457,False,0.3111,0.3966,True,3.8662,False,
+301225,恒勃股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,13.4662,True,0.1676,0.1175,True,1.1458,False,
+301311,昆船智能,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,254.6733,False,0.0935,-3.2749,False,,,PEG近似值计算失败：利润增长率无效或非正 (-3.2749303178660663).
+301387,光大同创,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,76.6835,False,0.5087,0.5588,True,1.3722,False,
+301391,卡莱特,2025-05-27,ChanBreakoutStrategyV8,Daily,True,98.4226,False,-0.2587,-0.8332,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.8331515408238908).
+301507,民生健康,2025-05-27,ChanBreakoutStrategyV8,Daily,True,17.2224,True,0.1532,0.0651,True,2.6454,False,
+301525,儒竞科技,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,22.7302,True,0.1939,0.2253,True,1.0090,False,
+301559,中集环科,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,4.9225,True,-0.0129,-0.5699,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.5699325629351747).
+600051,宁波联合,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,27.3632,True,0.6100,0.9396,True,0.2912,True,
+600053,九鼎投资,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.2484,-7.3740,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-7.374020500047897).; PE计算失败：年度净利润无效或非正 (-268000000.00000003).
+600189,泉阳泉,2025-05-27,ChanBreakoutStrategyV8,Daily,False,936.3196,False,0.3176,1.9023,True,4.9220,False,
+600303,曙光股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,0.0140,-0.1417,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-0.14166448356082081).; PE计算失败：年度净利润无效或非正 (-341000000.0).
+600305,恒顺醋业,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,True,70.4085,False,0.3609,0.0236,True,29.8364,False,
+600336,澳柯玛,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.1380,0.2937,False,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-48525400.0).
+600343,航天动力,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.0125,-0.1442,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-0.14424047949008276).; PE计算失败：年度净利润无效或非正 (-187000000.0).
+600379,宝光股份,2025-05-27,ChanBreakoutStrategyV8,Daily,True,39.9217,False,-0.2045,0.1612,False,2.4758,False,
+600396,华电辽能,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,54.7779,False,-0.0128,0.1774,False,3.0875,False,
+600410,华胜天成,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,436.3092,False,-0.0045,1.8810,False,2.3196,False,
+600476,湘邮科技,2025-05-27,ChanBreakoutStrategyV8,Daily,False,233.8256,False,0.2579,1.7149,True,1.3635,False,
+600483,福能股份,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,True,9.6581,True,0.0029,0.4297,True,0.2248,True,
+600505,西昌电力,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,724.5873,False,0.0720,1.1108,True,6.5230,False,
+600592,龙溪股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,81.8989,False,-0.1371,-0.1538,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.1537981381703452).
+600730,中国高科,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,False,75.7168,False,-0.1934,-0.9110,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.910979012053026).
+600790,轻纺城,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,41.0720,False,-0.0533,-0.4680,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.467953994069548).
+600855,航天长峰,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.3390,0.0106,False,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-246000000.0).
+601008,连云港,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,44.5672,False,-0.0425,-0.4801,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.48009497481935626).
+601083,锦江航运,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,2.2637,True,0.3328,1.8790,True,0.0120,True,
+603067,振华股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,23.5069,True,0.0759,0.3682,True,0.6384,True,
+603102,百合股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,12.0094,True,0.0952,0.0102,True,11.7797,False,
+603139,康惠制药,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.0472,-16.8697,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-16.869741323759552).; PE计算失败：年度净利润无效或非正 (-89625500.0).
+603286,日盈电子,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,325.7326,False,0.2449,-2.2987,False,,,PEG近似值计算失败：利润增长率无效或非正 (-2.298742303846761).
+603321,梅轮电梯,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,18.1125,True,-0.1103,-0.9416,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.9415564043104624).
+603331,百达精工,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,61.7070,False,0.0402,-0.2752,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.27518376957875523).
+603351,威尔药业,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,25.7168,True,0.0606,0.0573,True,4.4851,False,
+603416,信捷电气,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,35.8620,False,0.1412,0.0346,True,10.3737,False,
+603599,广信股份,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,True,13.8487,True,-0.1918,-0.2844,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.28444444444444444).
+603610,麒盛科技,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,27.8227,True,0.0410,-0.0101,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.010110654132393263).
+603611,诺力股份,2025-05-27,ChanBreakoutStrategyV8,Daily,True,11.8328,True,-0.0668,0.0696,False,1.7010,False,
+603639,海利尔,2025-05-27,ChanBreakoutStrategyV8,Daily,True,27.7513,True,0.1020,0.1572,True,1.7653,False,
+603687,大胜达,2025-05-27,ChanBreakoutStrategyV8,Daily,True,38.8095,False,0.0514,0.6752,True,0.5747,True,
+603697,有友食品,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,38.3014,False,0.3927,0.1625,True,2.3571,False,
+603809,豪能股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,38.7131,False,0.1337,0.3035,True,1.2756,False,
+603839,安正时尚,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,0.1297,2.6807,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-124000000.0).
+603896,寿仙谷,2025-05-27,ChanBreakoutStrategyV8,Daily,True,25.3899,True,-0.2262,-0.2432,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.24317582477421296).
+603938,三孚股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,89.0578,False,0.0810,1.5798,True,0.5637,True,
+603983,丸美生物,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,55.2017,False,0.2814,0.2162,True,2.5531,False,
+605009,豪悦护理,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,25.3187,True,0.4234,0.0567,True,4.4645,False,
+605133,嵘泰股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,44.2531,False,0.2980,0.1376,True,3.2155,False,
+605138,盛泰集团,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,82.4372,False,-0.1006,2.0014,False,0.4119,True,
+605151,西上海,2025-05-27,ChanBreakoutStrategyV8,Daily,False,73.5420,False,0.4053,-1.3155,False,,,PEG近似值计算失败：利润增长率无效或非正 (-1.3154871228905343).
+605188,国光连锁,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,2372.4603,False,0.0515,-0.1807,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.18074839720650598).
+605366,宏柏新材,2025-05-27,ChanBreakoutStrategyV8,Daily,False,,,-0.0557,-1.7942,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-1.7942219897951972).; PE计算失败：年度净利润无效或非正 (-30867100.0).
+605566,福莱蒽特,2025-05-27,ChanBreakoutStrategyV8,Daily,True,122.5430,False,-0.1735,-0.0912,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.09124976826716798).
+688011,新光光电,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.7620,-1.5729,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-1.5728507369821279).; PE计算失败：年度净利润无效或非正 (-67958400.0).
+688084,晶品特装,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,2.1281,0.6149,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-57193000.0).
+688121,卓然股份,2025-05-27,ChanBreakoutStrategyV8,Daily,False,18.6381,True,2.2715,0.7929,True,0.2351,True,
+688173,希荻微,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,0.4472,0.4423,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-291000000.0).
+688180,君实生物,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,False,,,0.3150,0.1696,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-1281000000.0).
+688233,神工股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,110.6545,False,0.8175,18.5065,True,0.0598,True,
+688277,天智航,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,False,,,1.0240,-0.3122,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-0.3121969154940774).; PE计算失败：年度净利润无效或非正 (-121000000.0).
+688285,高铁电气,2025-05-27,ChanBreakoutStrategyV8,Daily,True,69.9216,False,0.5897,57.6721,True,0.0121,True,
+688314,康拓医疗,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,28.5449,True,0.1798,0.2063,True,1.3835,False,
+688356,键凯科技,2025-05-27,ChanBreakoutStrategyV8,Daily,True,138.7412,False,0.0666,-0.1779,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.1779395381986009).
+688375,国博电子,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,30.5202,False,-0.4949,-0.5245,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.5245338842975207).
+688386,泛亚微透,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,39.3426,False,0.2596,0.4322,True,0.9103,True,
+688580,伟思医疗,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,41.0245,False,0.0940,0.5271,True,0.7783,True,
+688600,皖仪科技,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,199.6341,False,0.1652,0.8378,True,2.3827,False,
+688602,康鹏科技,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,0.4379,0.5973,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-49531600.0).
+688663,新风光,2025-05-27,ChanBreakoutStrategyV8,Daily,True,23.3157,True,0.1186,-0.3047,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.304713371382183).
+688682,霍莱沃,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,187.0214,False,0.2326,1.4098,True,1.3265,False,
+688716,中研股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,64.2245,False,0.6481,64.2849,True,0.0100,True,
+688722,同益中,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,36.6205,False,1.2793,1.4735,True,0.2485,True,
+688737,中自科技,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,0.0747,-0.4691,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-0.46908218554824826).; PE计算失败：年度净利润无效或非正 (-26211600.0).
+831195,三祥科技,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,18.8828,True,0.2227,3.2093,True,0.0588,True,
+831768,拾比佰,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,0.1886,3.2180,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-3675000.0).
+831834,三维股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,22.4740,True,0.2077,0.6146,True,0.3657,True,
+832876,慧为智能,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,799.1441,False,0.2364,-0.2234,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.22339889056984366).
+832885,星辰科技,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,97.5066,False,0.3171,0.1844,True,5.2867,False,
+833266,生物谷,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,-0.4018,-2.5925,False,,,PEG近似值计算失败：PE 是 NaN.; PEG近似值计算失败：利润增长率无效或非正 (-2.5925275184485197).; PE计算失败：年度净利润无效或非正 (-74401000.0).
+833454,同心传动,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,45.8030,False,0.3933,1.0500,True,0.4362,True,
+833580,科创新材,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,78.6056,False,-0.0816,-0.4889,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.48890606529053376).
+833943,优机股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,12.6919,True,0.2119,0.9990,True,0.1271,True,
+834058,华洋赛车,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,17.3907,True,2.6325,1.6179,True,0.1075,True,
+834261,一诺威,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,15.2456,True,0.0903,0.2795,True,0.5455,True,
+836247,华密新材,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,59.2384,False,0.0647,-0.1119,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.11191930217458809).
+836419,万德股份,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,29.2714,True,-0.3000,-0.4789,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.4788564217066304).
+837242,建邦科技,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,11.6817,True,0.2238,0.4972,True,0.2350,True,
+838163,方大新材,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,24.7220,True,0.4545,-0.1324,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.13240617680101613).
+839725,惠丰钻石,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,False,326.4956,False,-0.3542,-2.3301,False,,,PEG近似值计算失败：利润增长率无效或非正 (-2.330134890835767).
+839946,华阳变速,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,0.0893,1.6058,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-16306700.0).
+870656,海昇药业,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,9.8587,True,0.0017,-0.2091,False,,,PEG近似值计算失败：利润增长率无效或非正 (-0.20906000238578074).
+871642,通易航天,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,0.1441,0.7976,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-1584800.0).
+871694,中裕科技,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,11.4427,True,0.4839,1.1977,True,0.0955,True,
+920066,科拜尔,2025-05-27,AdaptedMAPullbackStrategy,Daily,True,11.1991,True,0.2000,0.0251,True,4.4571,False,
+920819,颖泰生物,2025-05-27,AdaptedMAPullbackStrategy,Daily,False,,,0.0095,1.0789,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-587000000.0).
+920819,颖泰生物,2025-05-27,RefactoredMultiLevelCrossStrategy,daily,False,,,0.0095,1.0789,True,,,PEG近似值计算失败：PE 是 NaN.; PE计算失败：年度净利润无效或非正 (-587000000.0).

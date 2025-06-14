@@ -1,0 +1,6 @@
+﻿symbol,signal_date,strategy,timeframe,net_profit_positive_3y_latest,pe,pe_lt_30,revenue_growth_yoy,profit_growth_yoy,growth_positive,peg_like_ratio,peg_like_lt_1,error_reason
+002285,2025-05-07,MultiLevelCross,daily,False,,,,,,,,Invalid Annual Profit (None) for PE; Missing reports for YoY growth; PE is NaN for PE/Growth calc; Rev Growth invalid for PE/Growth calc
+002556,2025-05-07,MultiLevelCross,daily,False,,,,,,,,Invalid Annual Profit (None) for PE; Missing reports for YoY growth; PE is NaN for PE/Growth calc; Rev Growth invalid for PE/Growth calc
+300587,2025-05-07,MultiLevelCross,daily,False,,,,,,,,Invalid Annual Profit (None) for PE; Missing reports for YoY growth; PE is NaN for PE/Growth calc; Rev Growth invalid for PE/Growth calc
+600824,2025-05-07,MultiLevelCross,daily,False,,,,,,,,Invalid Annual Profit (None) for PE; Missing reports for YoY growth; PE is NaN for PE/Growth calc; Rev Growth invalid for PE/Growth calc
+601816,2025-05-07,MultiLevelCross,daily,False,,,,,,,,Invalid Annual Profit (None) for PE; Missing reports for YoY growth; PE is NaN for PE/Growth calc; Rev Growth invalid for PE/Growth calc

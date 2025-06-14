@@ -1,4 +1,5 @@
 # data_processing/scraper.py
+import collections
 import logging
 import re
 import time
@@ -6,9 +7,13 @@ import random # <--- 确保导入 random 模块
 import requests
 import io
 import os
+import json
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from urllib.parse import urljoin, urlparse, parse_qs
+import pdfplumber
+
+from core.llm_provider import SiliconFlowProvider
 
 # --- Selenium Imports ---
 try:
@@ -32,10 +37,48 @@ from pypdf import PdfReader # 使用 pypdf
 
 logger = logging.getLogger(__name__)
 
-# --- 保持不变的辅助函数 ---
-# get_random_user_agent, setup_stealth_options, chinese_to_number,
-# extract_section_from_text, stealth_download_pdf, try_construct_pdf_url
-# ... (这些函数的代码如上次回复所示) ...
+
+def identify_common_lines(pdf_stream: io.BytesIO, threshold: int = 2) -> set:
+    """
+    仅识别PDF中的通用行（页眉/页脚），返回一个待删除行的集合。
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        logger.error("需要 pdfplumber 库，请先安装: pip install pdfplumber")
+        return set()
+
+    all_lines = []
+    with pdfplumber.open(pdf_stream) as pdf:
+        if not pdf.pages:
+            return set()
+        for page in pdf.pages:
+            page_text = page.extract_text()
+            if page_text:
+                lines_on_page = [line.strip() for line in page_text.split('\n')]
+                all_lines.extend(lines_on_page)
+
+    if not all_lines:
+        return set()
+
+    line_counts = collections.Counter(line for line in all_lines if line)
+    common_lines = {line for line, count in line_counts.items() if count > threshold}
+
+    logger.info(f"识别到 {len(common_lines)} 条通用行（页眉/页脚）。")
+    return common_lines
+
+
+def clean_text_with_blacklist(text: str, blacklist: set) -> str:
+    """
+    使用一个黑名单（集合）来清理文本中的所有通用行。
+    """
+    if not text:
+        return ""
+
+    lines = text.split('\n')
+    cleaned_lines = [line for line in lines if line.strip() not in blacklist]
+
+    return "\n".join(cleaned_lines)
 
 def dynamic_wait(driver, selector_type: str, selector: str, timeout: int = 15):
     """智能等待页面元素加载"""
@@ -139,110 +182,175 @@ def chinese_to_number(cn_num: str) -> int:
               num = num_map[char]
               break # 找到第一个就停止
     return num
+
+
+def reconstruct_paragraphs(text_with_soft_breaks: str) -> str:
+    """
+    智能重构段落，将因页面宽度导致的软换行合并。
+    """
+    if not text_with_soft_breaks:
+        return ""
+
+    logger.info("开始进行段落重构，合并段内换行...")
+
+    # 按换行符分割成独立的行
+    lines = text_with_soft_breaks.split('\n')
+    reconstructed_text = ""
+
+    for i, line in enumerate(lines):
+        current_line = line.strip()
+        if not current_line:
+            continue
+
+        reconstructed_text += current_line
+
+        # 判断当前行是否是一个段落的真正结尾
+        # 规则：如果行尾是结束性标点，或者是整个文本的最后一行，则保留换行
+        # 增加了对表格中数字结尾的特殊判断，如果行尾是数字，也倾向于保留换行
+        if (current_line.endswith(('。', '！', '？', '"',"：",";",")","]")) or
+                (i + 1 == len(lines)) or
+                (re.search(r'\d$', current_line))):
+            reconstructed_text += "\n"
+        else:
+            # 如果不是段落结尾，则不加换行符，下一行的内容会直接拼接上来
+            pass
+
+    # 将可能出现的多个换行符合并为两个（段间空一行）
+    final_text = re.sub(r'\n{2,}', '\n\n', reconstructed_text)
+
+    logger.info("段落重构完成。")
+    return final_text
+
+
+# scraper.py (请替换此函数)
+
+def remove_tables(text: str) -> str:
+    """
+    【V3 精准版】使用更保守和精确的启发式规则，移除文本化表格，核心是防止误删正文。
+    """
+    logger.info("开始最终清理：使用【V3 精准版】规则移除表格...")
+    lines = text.split('\n')
+    cleaned_lines = []
+
+    # 规则1: 匹配含有至少2个大间距空格的行，这是表格对齐的强特征。
+    column_space_pattern = re.compile(r'\s{3,}')
+
+    # 规则2: 匹配包含多个独立数字/百分比的行，现在能正确处理括号和负数
+    # (一个数字/百分比模式，前后可能有空格)
+    numeric_pattern = r'\s*\(?-?[\d,.]+\)?%?\s*'
+    multi_number_pattern = re.compile(f'({numeric_pattern}){{3,}}')  # 匹配连续出现3次以上的数字模式
+
+    removed_count = 0
+    for line in lines:
+        stripped_line = line.strip()
+
+        # 如果是空行，直接保留，它可能是段落分隔符
+        if not stripped_line:
+            cleaned_lines.append(line)
+            continue
+
+        # --- 保护规则：如果像一个完整的句子，则绝对不删除 ---
+        if stripped_line.endswith('。'):
+            cleaned_lines.append(line)
+            continue
+
+        # --- 识别规则 ---
+        # 特征a: 是否包含用于列对齐的大量空格
+        has_large_spacing = bool(column_space_pattern.search(line))
+        # 特征b: 是否包含多列独立的数字
+        has_multi_numbers = bool(multi_number_pattern.search(stripped_line))
+
+        # 只有当【包含大间距】或【包含多列数字】时，才判定为表格行并移除
+        if has_large_spacing or has_multi_numbers:
+            removed_count += 1
+            logger.debug(f"移除表格行: {stripped_line[:100]}...")
+        else:
+            cleaned_lines.append(line)
+
+    logger.info(f"使用【V3 精准版】规则移除了 {removed_count} 行疑似表格的行。")
+    final_text = "\n".join(cleaned_lines)
+    # 最后再规整一下可能因移除表格而产生的多余空行
+    return re.sub(r'\n{3,}', '\n\n', final_text)
 def extract_section_from_text(text: str, section_title: str) -> Optional[str]:
     """
-    增强版章节内容提取（基于 test5.py 中的逻辑）。
-    尝试从 PDF 全文中提取指定标题的章节内容。
-
-    Args:
-        text: PDF 的完整文本内容。
-        section_title: 要提取的章节标题 (例如 "管理层讨论与分析")。
-
-    Returns:
-        提取到的章节文本内容，如果未找到则返回 None。
+    【最终版】章节内容提取。
+    核心思想：
+    1. 使用灵活的模式定位起始标题。
+    2. 使用一个"界碑"列表（包含所有可能的下一章节标题）来准确定位结束边界。
     """
     if not text or not section_title:
         return None
 
-    logger.debug(f"Attempting to extract section: '{section_title}'")
+    logger.info(f"开始使用最终版逻辑提取章节: '{section_title}'")
 
-    # 1. 构造正则表达式
-    # 匹配 "第[一二三四五六七八九十]+节<空格或换行符>*章节标题"
-    # 排除像目录页那样的行 "... <数字>"
-    numbered_pattern = re.compile(
-        r'第\s*([一二三四五六七八九十]+)\s*(?:节|章)'  # <--- 已修改
-        r'\s*'rf'{re.escape(section_title)}'
-        r'(?![^\n]*?\s*\.{3,}\s*\d+)'r'\s*$',
-        re.IGNORECASE | re.MULTILINE
-    )
-    unnumbered_pattern = re.compile(  # 这个通常不变
-        r'^\s*'rf'{re.escape(section_title)}'
-        r'(?![^\n]*?\s*\.{3,}\s*\d+)'r'\s*$',
-        re.IGNORECASE | re.MULTILINE
-    )
-
-    # 2. 查找起始位置
-    start_match = numbered_pattern.search(text)
-    current_section_num = None
-    if start_match:
-        current_section_num = chinese_to_number(start_match.group(1))
-        start_idx = start_match.end()
-        logger.debug(f"Found numbered section start (Section {current_section_num}) at index {start_idx}")
-    else:
-        start_match = unnumbered_pattern.search(text)
+    # --- 1. 定位起始位置 (此部分逻辑已经验证有效，予以保留) ---
+    start_match = None
+    patterns_to_try = [
+        re.compile(r"^\s*" + re.escape(section_title) + r"\s*$", re.MULTILINE),
+        re.compile(r"^\s*" + re.escape(section_title) + r"[^\w\n]*$", re.MULTILINE),
+        re.compile(
+            r"^\s*(?:第\s*[一二三四五六七八九十]+\s*[节章]|\d{1,2}(?:\.\d{1,2})?\s*[\.、]?)\s*"
+            rf"{re.escape(section_title)}[^\w\n]*$",
+            re.MULTILINE
+        )
+    ]
+    for i, pattern in enumerate(patterns_to_try):
+        start_match = pattern.search(text)
         if start_match:
-            start_idx = start_match.end()
-            logger.debug(f"Found unnumbered section start at index {start_idx}")
-        else:
-            logger.warning(f"Section title '{section_title}' not found.")
-            return None # 未找到起始标题
+            logger.info(f"通过模式 {i + 1} 找到章节标题 '{section_title}'，起始索引: {start_match.end()}")
+            break
 
-    # 跳过起始标题后的空行或特殊字符行，找到实际内容的开始
-    content_start_match = re.search(r'\S', text[start_idx:], re.MULTILINE)
-    if content_start_match:
-        start_idx += content_start_match.start()
-        logger.debug(f"Actual content start index adjusted to: {start_idx}")
-    else:
-        logger.warning("No actual content found after the section title.")
-        return "" # 标题找到了，但后面没内容
+    if not start_match:
+        logger.error(f"所有模式都未能找到章节标题: '{section_title}'")
+        return None
 
-    # 3. 查找结束位置
+    start_idx = start_match.end()
+
+    # --- 2. 查找结束位置 (采用新的"界碑"策略) ---
     end_idx = len(text)
-    next_section_pattern = re.compile(r'^\s*第\s*([一二三四五六七八九十]+)\s*(?:节|章)',
-                                      re.IGNORECASE | re.MULTILINE)  # <--- 已修改
-    next_section_match = next_section_pattern.search(text, start_idx)
 
-    if next_section_match:
-        # 如果当前章节有编号，确保找到的下一个章节编号更大（防止错误匹配文档内的引用）
-        if current_section_num is not None:
-            next_num = chinese_to_number(next_section_match.group(1))
-            if next_num > current_section_num:
-                end_idx = next_section_match.start()
-                logger.debug(f"Found next numbered section (Section {next_num}) at index {end_idx}")
-            else:
-                # 找到的 "第X节" 编号不大于当前编号，可能不是真正的下一章节标题，继续搜索
-                logger.debug(f"Found potential next section (Section {next_num}) but number is not greater than current ({current_section_num}), searching further...")
-                next_section_match_further = next_section_pattern.search(text, next_section_match.end())
-                while next_section_match_further:
-                     next_num_further = chinese_to_number(next_section_match_further.group(1))
-                     if next_num_further > current_section_num:
-                          end_idx = next_section_match_further.start()
-                          logger.debug(f"Found correct next numbered section (Section {next_num_further}) further down at index {end_idx}")
-                          break
-                     next_section_match_further = next_section_pattern.search(text, next_section_match_further.end())
-                else: # while 循环正常结束，没有找到更大的编号
-                     logger.debug("No subsequent section with a greater number found, using end of text.")
-                     end_idx = len(text)
+    # 定义一个列表，包含所有可能标志着我们目标章节结束的、下一个主章节的标题
+    # 这些标题来自您PDF的目录页
+    next_section_markers = [
+        "公司治理报告",  # 第8章
+        "董事、监事、高级管理人员",  # 第9章，用关键词即可
+        "环境与社会责任",  # 第10章
+        "重要事项",  # 第11章
+        "股本变动及股东情况"  # 第12章
+    ]
 
-        # 如果当前章节没有编号，找到的第一个 "第X节" 就是结束标志
-        else:
-            end_idx = next_section_match.start()
-            logger.debug(f"Found next numbered section at index {end_idx}")
+    found_end_positions = []
+
+    # 遍历所有可能的结束标志
+    for marker in next_section_markers:
+        # 构造一个简单的、只在行首匹配的正则表达式
+        pattern = re.compile(r"^\s*" + re.escape(marker), re.MULTILINE)
+        match = pattern.search(text, start_idx)  # 从我们找到的章节开始位置之后搜索
+        if match:
+            found_end_positions.append(match.start())
+            logger.debug(f"找到结束标志 '{marker}' 在索引: {match.start()}")
+
+    # 如果找到了一个或多个结束标志，取其中最靠前（最小）的那个作为最终结束点
+    if found_end_positions:
+        end_idx = min(found_end_positions)
+        logger.info(f"最终确定章节结束边界在索引: {end_idx}")
     else:
-         logger.debug("No subsequent '第X节' found, using end of text as boundary.")
+        logger.warning("未找到任何预定义的下一章节标题，将提取至文档末尾。")
 
-
-    # 4. 提取并初步清理
+    # --- 3. 提取与清理 (此部分逻辑不变) ---
     content = text[start_idx:end_idx].strip()
-    logger.info(f"Extracted section content length: {len(content)}")
 
-    # 进一步清理：移除可能的页眉页脚（简单规则，可能需要优化）
-    # 例如，移除看起来像页码的行 (^\s*\d+\s*$)
-    content = re.sub(r'^\s*\d+\s*$', '', content, flags=re.MULTILINE)
-    # 合并多个空行
+    # ... (清理 TOC 行、页码行、空行的 re.sub 代码保持不变) ...
+    toc_pattern = re.compile(r'^[^\n]*\.{3,}\s*\d+\s*$', re.MULTILINE)
+    content = toc_pattern.sub('', content)
+    page_number_pattern = re.compile(r'^\s*\d+\s*$', re.MULTILINE)
+    content = page_number_pattern.sub('', content)
     content = re.sub(r'\n{3,}', '\n\n', content)
 
+    logger.info(f"最终清理后内容长度: {len(content)}")
+
     return content if content else None
+
 def stealth_download_pdf(url: str, referer: Optional[str] = None) -> Optional[io.BytesIO]:
     """
     使用 requests 隐蔽地下载 PDF 文件内容。
@@ -348,162 +456,388 @@ def setup_stealth_options() -> Optional[Options]:
     return chrome_options
 # ======================================================================
 # --- 主函数：抓取全文或章节 ---
-def fetch_announcement_text(detail_url: str, title: str) -> Optional[str]:
+def fetch_announcement_text(detail_url: str, title: str, tag: Optional[str] = None) -> Optional[str]:
     """
-    获取公告文本。优先尝试直接构造 PDF URL 下载，
-    如果失败，则使用 Selenium 查找 embed 标签获取 URL。
+    【V2 精简版】获取公告的原始全文。
+    此函数的职责是获取最原始、最完整的文本，不做任何章节提取。
+    后续的解析、提取、清理工作由调用方根据业务需求决定。
+
+    处理流程:
+    1. 尝试从详情页URL直接构造PDF链接并下载。
+    2. 如果失败，则使用Selenium模拟浏览器访问详情页，找到PDF链接并下载。
+    3. 获取PDF内容后，使用pdfplumber提取所有文本。
+    4. 对提取的文本进行基础清理（移除页眉页脚）。
     """
-    logger.info(f"Fetching announcement: '{title}' from {detail_url}")
-    if "摘要" in title:
-        logger.info(f"Skipping processing for abstract announcement: {title}")
+    logger.info(f"开始为公告 '{title}' 获取全文，URL: {detail_url}")
+
+    if not detail_url:
+        logger.error("公告URL为空，无法获取内容。")
         return None
 
-    pdf_stream = None
-    pdf_url_to_process = None
+    # 优先尝试直接构造PDF链接
+    pdf_url = try_construct_pdf_url(detail_url)
+    pdf_content_stream = None
 
-    # --- 1. 尝试直接构造 PDF URL (优先) ---
-    constructed_pdf_url = try_construct_pdf_url(detail_url)
-    if constructed_pdf_url:
-        logger.info(f"Attempting direct download using constructed URL: {constructed_pdf_url}")
-        pdf_stream = stealth_download_pdf(constructed_pdf_url, referer=detail_url) # 使用 detail_url 作为 Referer
-        if pdf_stream:
-            pdf_url_to_process = constructed_pdf_url
-            logger.info("Direct download successful using constructed URL.")
-        else:
-            logger.warning("Direct download failed using constructed URL, falling back to Selenium...")
-
-    # --- 2. 如果直接构造/下载失败，尝试 Selenium (查找 embed 标签) ---
-    if not pdf_stream and SELENIUM_AVAILABLE:
-        logger.info("Attempting Selenium fallback to find PDF link in <embed> tag...")
-        driver = None
-        selenium_pdf_url = None # 初始化变量
+    if pdf_url:
+        # 使用带有随机User-Agent的requests下载
+        headers = {'User-Agent': get_random_user_agent()}
         try:
-            chrome_opts = setup_stealth_options()
-            if not chrome_opts: return None
+            response = requests.get(pdf_url, headers=headers, timeout=60)
+            response.raise_for_status()
+            if 'application/pdf' in response.headers.get('Content-Type', ''):
+                pdf_content_stream = io.BytesIO(response.content)
+                logger.info("已通过构造的URL直接下载PDF。")
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"直接下载PDF失败: {e}，将尝试Selenium后备方案。")
+            pdf_content_stream = None
 
-            # 确保 webdriver 导入成功
-            if not webdriver:
-                 logger.error("Selenium is available but webdriver could not be imported.")
-                 return None
-            driver = webdriver.Chrome(options=chrome_opts)
-
-            # --- 注入 Stealth Script ---
-            stealth_script_path = 'stealth.min.js' # 假设在项目根目录
-            if not os.path.exists(stealth_script_path):
-                 logger.warning(f"Stealth script not found at {stealth_script_path}. Proceeding without it.")
-            else:
-                 try:
-                     with open(stealth_script_path, encoding='utf-8') as f:
-                         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": f.read()})
-                     logger.info("Stealth script injected.")
-                 except Exception as e:
-                     logger.warning(f"Error executing stealth script: {e}")
-            # --------------------------
-
-            driver.get(detail_url)
-            # 不需要太复杂的滚动，因为 embed 通常在主框架中
-            time.sleep(random.uniform(1.0, 2.0))
-
-            # --- 修改等待逻辑：等待 embed 标签出现并可见 ---
-            embed_selector = 'embed.pdfobject[src*=".pdf"], embed.pdfobject[src*=".PDF"]' # CSS Selector
-            logger.info(f"Waiting up to 35s for embed element to be visible: {embed_selector}")
-            # 使用 dynamic_wait 等待元素可见
-            wait_element = dynamic_wait(driver, 'css', embed_selector, timeout=35)
-
-            if wait_element:
-                logger.info("Selenium found visible embed PDF element. Extracting src...")
-                try:
-                    selenium_pdf_url_raw = wait_element.get_attribute('src')
-                    if selenium_pdf_url_raw:
-                         # 清理 URL，移除 # 后面的部分，并确保是绝对 URL
-                         selenium_pdf_url = urljoin(detail_url, selenium_pdf_url_raw.split('#')[0])
-                         logger.info(f"Extracted PDF URL from embed src: {selenium_pdf_url}")
-                    else:
-                         logger.warning("Found embed element but could not extract src attribute.")
-                except Exception as e_get_attr:
-                     logger.error(f"Error getting src attribute from embed element: {e_get_attr}")
-            else:
-                logger.warning(f"Selenium timed out waiting for embed PDF element on {detail_url}.")
-                # （可选）即使等待失败，也可以尝试最后解析一次页面源码
-                # soup = BeautifulSoup(driver.page_source, 'lxml')
-                # embed_tag = soup.select_one(embed_selector)
-                # if embed_tag and embed_tag.get('src'): ...
-
-            # --- 如果通过 Selenium 找到了 URL，尝试下载 ---
-            if selenium_pdf_url:
-                 logger.info(f"Attempting download using URL from Selenium: {selenium_pdf_url}")
-                 pdf_stream = stealth_download_pdf(selenium_pdf_url, referer=detail_url)
-                 if pdf_stream:
-                     pdf_url_to_process = selenium_pdf_url
-                     logger.info("Successfully downloaded PDF using URL found via Selenium.")
-                 else:
-                     logger.warning(f"Download failed for URL found via Selenium: {selenium_pdf_url}")
-            else:
-                 logger.warning("Could not extract a valid PDF URL using Selenium method.")
-
-
-        except Exception as e:
-            logger.error(f"General Selenium operation error for {detail_url}: {e}", exc_info=True)
-        finally:
-            if driver:
-                driver.quit()
-                logger.debug("Selenium driver quit.")
-
-    # --- 处理获取到的 PDF 流 ---
-    if not pdf_stream:
-        logger.error(f"Ultimately failed to obtain PDF stream for '{title}' from {detail_url}")
-        return None
-
-    logger.info(f"Processing PDF stream obtained from URL: {pdf_url_to_process}")
-    try:
-        reader = PdfReader(pdf_stream)
-        if reader.is_encrypted:
-             logger.warning(f"PDF is encrypted: {pdf_url_to_process}")
-             return None
-        if len(reader.pages) == 0:
-            logger.warning(f"PDF appears to be empty: {pdf_url_to_process}")
+    # 如果直接下载失败，使用Selenium作为后备
+    if not pdf_content_stream:
+        if not SELENIUM_AVAILABLE:
+            logger.error("直接下载PDF失败且Selenium不可用，无法获取公告内容。")
             return None
+        logger.info("正在启动Selenium以间接获取PDF...")
+        pdf_content_stream = stealth_download_pdf(detail_url)
 
-        full_text = ""
-        for i, page in enumerate(reader.pages):
-            try:
-                page_text = page.extract_text()
-                if page_text:
-                    full_text += page_text + "\n"
-            except Exception as page_err:
-                # 记录更详细的页码错误
-                logger.warning(f"Error extracting text from page {i+1}/{len(reader.pages)} of {pdf_url_to_process}: {page_err}")
-                continue # 继续处理下一页
-
-        if not full_text.strip():
-             logger.warning(f"Text extraction yielded empty result for {pdf_url_to_process}.")
-             # 即使提取为空，也可能返回一个空字符串或 None，取决于下游是否需要区分
-             return None # 或者 return ""
-
-        logger.info(f"Successfully extracted text (length: {len(full_text)}) from {pdf_url_to_process}")
-
-        # 章节提取逻辑
-        if '年度报告' in title or '半年度报告' in title:
-            if '摘要' not in title:
-                 logger.debug(f"Attempting to extract '管理层讨论与分析' from non-abstract report: {title}")
-                 section = extract_section_from_text(full_text, "管理层讨论与分析")
-                 if section:
-                     logger.info("Extracted '管理层讨论与分析' section.")
-                     return section
-                 else:
-                     logger.warning("Could not extract '管理层讨论与分析', returning full text for non-abstract report.")
-                     return full_text.strip()
-            else:
-                 logger.info("Returning full text for abstract report.")
-                 return full_text.strip()
-        else:
-            logger.info("Returning full text for other announcement types.")
-            return full_text.strip()
-
-    except ImportError as e_pypdf:
-         # 特别处理 pypdf 可能的导入错误
-         logger.critical(f"pypdf library might be missing or corrupted: {e_pypdf}. Please install/reinstall it.")
-         return None
-    except Exception as e:
-        logger.error(f"Error processing PDF stream from {pdf_url_to_process}: {e}", exc_info=True)
+    if not pdf_content_stream:
+        logger.error(f"最终未能为URL获取到PDF内容: {detail_url}")
         return None
+
+    # 使用 pdfplumber 提取文本 (因为它更稳健)
+    try:
+        # 重置流的位置，以便pdfplumber可以读取
+        pdf_content_stream.seek(0)
+        common_items = identify_common_lines(pdf_content_stream)
+        
+        pdf_content_stream.seek(0) # 再次重置
+        full_text = ""
+        with pdfplumber.open(pdf_content_stream) as pdf:
+            full_text = "\n".join([page.extract_text() for page in pdf.pages if page.extract_text()])
+        
+        # 清理页眉页脚
+        cleaned_text = clean_text_with_blacklist(full_text, common_items)
+        
+        logger.info(f"成功提取并清理文本 (最终长度: {len(cleaned_text)})")
+        return cleaned_text
+
+    except Exception as e:
+        logger.error(f"使用pdfplumber处理PDF时发生错误: {e}", exc_info=True)
+        return None
+
+
+
+def _parse_numbered_qa(text: str) -> List[Dict[str, str]]:
+    """
+    【内部解析器1】处理数字编号格式的Q&A (例如 "1、问题...")
+    这是我们之前的V2版本逻辑，现在封装为辅助函数。
+    """
+    logger.info("检测到编号格式，使用【数字编号解析器】。")
+    qa_pairs = []
+    # 正则表达式：查找从 "数字、" 开始，直到下一个 "数字、" 或文本末尾的整个块
+    question_blocks = re.finditer(r"(\d+[\.、．]\s*.*?)(?=\d+[\.、．]|$)", text, re.DOTALL)
+
+    for match in question_blocks:
+        parts = match.group(0).strip().split('\n')
+        if not parts:
+            continue
+
+        question_text = re.sub(r"^\d+[\.、．]\s*", "", parts[0]).strip()
+        answer_text = "\n".join(parts[1:]).strip()
+
+        if answer_text.startswith("答:"):
+            answer_text = answer_text[len("答:"):].strip()
+
+        if question_text and answer_text:
+            qa_pairs.append({"question": question_text, "answer": answer_text})
+
+    return qa_pairs
+
+
+def _parse_qa_by_prefix(text: str) -> List[Dict[str, str]]:
+    """
+    【内部解析器2】处理前缀格式的Q&A (例如 "Q: 问题... A: 答案...")
+    """
+    logger.info("检测到前缀格式，使用【Q:/A: 前缀解析器】。")
+    qa_pairs = []
+
+    # 使用 "Q:" 作为分隔符来切分整个文本块
+    # 第一个元素是 "Q:" 之前的内容，我们将其忽略
+    q_blocks = text.split('Q:')[1:]
+
+    for block in q_blocks:
+        # 在每个块中，使用 "A:" 来分割问题和答案
+        parts = block.split('A:', 1)  # 只分割一次
+        if len(parts) == 2:
+            question = parts[0].strip()
+            answer = parts[1].strip()
+            if question and answer:
+                qa_pairs.append({"question": question, "answer": answer})
+
+    return qa_pairs
+
+
+def extract_qa_from_text(text: str) -> List[Dict[str, str]]:
+    """
+    【V3 智能调度器】自动检测Q&A格式并调用相应的解析器。
+    """
+    logger.info("开始使用【V3 智能调度版】Q&A解析器...")
+
+    # --- 格式检测与调度 ---
+    # 策略1：检测是否存在数字编号格式 (e.g., "1、", "2.")
+    if re.search(r"^\s*\d+[\.、．]", text, re.MULTILINE):
+        return _parse_numbered_qa(text)
+
+    # 策略2：如果策略1不匹配，则检测是否存在Q:/A:前缀格式
+    # 为避免误判，可以要求Q:和A:同时出现
+    elif 'Q:' in text and 'A:' in text:
+        return _parse_qa_by_prefix(text)
+
+    # 如果两种格式都未检测到
+    else:
+        logger.warning("在文本中未能检测到已知的问答格式 (数字编号 或 Q:/A:前缀)。")
+        return []
+
+
+
+def extract_qa_with_ai(full_text: str) -> list[dict[str, str]]:
+    """
+    【AI封装版 V2.1】修正了AI Provider的调用方式。
+    """
+    logger.info("开始使用【封装的AI Provider】解析Q&A...")
+
+    # 准备"黄金Prompt V2"，这部分不变
+    prompt = f"""
+    你是一个精准的文本处理程序，你的唯一任务是严格按照指令提取数据。
+
+    **输出要求 (必须严格遵守):**
+    1.  **必须**返回一个符合JSON规范的数组（JSON Array）。
+    2.  数组中的每个元素都是一个包含 "question" 和 "answer" 两个键的JSON对象。
+    3.  **不要**对原文进行任何形式的总结、分析、评价或改写。只需原文提取。
+    4.  **不要**在JSON内容之外添加任何解释性文字、标题或Markdown标记（如 ```json）。
+    5.  如果【源文本】中没有有效的问答内容，**必须**返回一个空的JSON数组 `[]`。
+
+    ---
+    【示例1】
+    输入: "1、公司的发展规划？\\n答：公司计划..."
+    输出:
+    [
+        {{"question": "公司的发展规划？", "answer": "公司计划..."}}
+    ]
+    ---
+    【示例2】
+    输入: "Q: 海外业务如何？ A: 海外业务稳定增长..."
+    输出:
+    [
+        {{"question": "海外业务如何？", "answer": "海外业务稳定增长..."}}
+    ]
+    ---
+
+    【源文本】
+    {full_text}
+    """
+
+    try:
+        # ↓↓↓↓↓↓  这是本次最关键的修改  ↓↓↓↓↓↓
+        # 1. 直接导入 SiliconFlowProvider 这个类
+        from core.llm_provider import SiliconFlowProvider
+
+        # 2. 直接实例化这个类，而不是通过工厂函数
+        llm_provider = SiliconFlowProvider()
+        # ↑↑↑↑↑↑        修改完成        ↑↑↑↑↑↑
+
+        ai_response_text = llm_provider.generate(prompt)
+
+        if not ai_response_text:
+            logger.error("AI Provider 未能返回任何内容。")
+            return []
+
+        logger.debug(f"AI Provider 返回的原始文本: {ai_response_text}")
+
+        # 解析AI返回的JSON字符串
+        json_match = re.search(r'\[.*\]', ai_response_text, re.DOTALL)
+        if not json_match:
+            logger.error(f"AI未能返回有效的JSON数组格式。返回内容: {ai_response_text}")
+            return []
+
+        parsed_json = json.loads(json_match.group(0))
+        logger.info(f"AI成功解析出 {len(parsed_json)} 个问答对。")
+        return parsed_json
+
+    except ImportError as e:
+        logger.error(f"导入模块时发生错误，请检查文件路径和名称：{e}")
+        return []
+    except Exception as e:
+        logger.error(f"在AI解析流程中发生错误: {e}", exc_info=True)
+        return []
+# scraper.py (请用这个AI测试版本替换文件末尾的 if __name__ == '__main__' 部分)
+# data_processing/scraper.py (请添加这个新函数)
+
+# data_processing/scraper.py
+
+def _chunk_text(text: str, max_chunk_size: int = 10000) -> list[str]:
+    """
+    一个简单的文本分块函数，会尽量在段落末尾分割。
+    """
+    paragraphs = text.split('\n')
+    chunks = []
+    current_chunk = ""
+    for p in paragraphs:
+        if len(current_chunk) + len(p) + 1 > max_chunk_size:
+            if current_chunk:
+                chunks.append(current_chunk)
+            current_chunk = p
+        else:
+            current_chunk += '\n' + p
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
+
+
+def extract_narrative_with_ai(full_text: str) -> Optional[str]:
+    """
+    【AI混合策略V3 - 分块处理终极版】
+    先用传统方法粗定位，然后将大文本分块，逐块交由AI清理，最后合并，以解决网络不稳定问题。
+    """
+    logger.info("开始使用【AI混合策略V3-分块版】提取年报/半年报核心章节...")
+
+    # 步骤1：先用传统方法进行"粗剪"，找到大概范围
+    logger.info("步骤1: 使用传统方法进行初步章节定位...")
+    rough_section = extract_section_from_text(full_text, "管理层讨论与分析")
+
+    if not rough_section or len(rough_section) < 200:
+        logger.warning("传统方法未能定位到有效的'管理层讨论与分析'章节，无法进行AI精修。")
+        return rough_section
+
+    logger.info(f"步骤1完成: 初步定位到章节文本，长度: {len(rough_section)}，准备进行分块AI精修。")
+
+    # 步骤2：将大文本块分割成小块
+    chunks = _chunk_text(rough_section)
+    logger.info(f"步骤2完成: 文本被分割成 {len(chunks)} 个块，准备逐一处理。")
+
+    # 步骤3：逐个处理每个文本块
+    cleaned_chunks = []
+    # 这个提示词现在只专注于清理，因为边界已经由传统方法确定
+    chunk_prompt_template = f"""
+    你是一位专业的财报文本清理专家。请对以下【部分章节内容】执行唯一的任务：
+    
+    **清理规则 (必须严格遵守):**
+    1.  **移除表格**: 精确地识别并删除所有数据表格行。表格的典型特征是：一行内包含多个用大量空白字符隔开的词语、数字或百分比。
+    2.  **保留正文**: 【必须】原封不动地保留所有叙述性的、成段的文字，即使句子中包含数字。
+    3.  **禁止任何改写**: 严禁进行任何形式的总结、归纳、分析或对原文进行任何修改。
+    4.  **纯净输出**: 直接返回清理后的文字，不要包含任何解释、前言或结尾。
+
+    ---需要清理的文本块如下---
+    {{text_chunk}}
+    """
+
+    ai_provider = SiliconFlowProvider()
+    for i, chunk in enumerate(chunks):
+        logger.info(f"步骤3: 正在处理块 {i+1}/{len(chunks)}...")
+        prompt = chunk_prompt_template.format(text_chunk=chunk)
+        
+        try:
+            cleaned_chunk = ai_provider.generate(prompt, model="Qwen/Qwen3-8B")
+            if cleaned_chunk:
+                cleaned_chunks.append(cleaned_chunk)
+                logger.info(f"块 {i+1} 清理成功。")
+            else:
+                logger.warning(f"AI未能处理块 {i+1}，将使用原始块作为备用。")
+                cleaned_chunks.append(chunk) # Fallback to original
+        except Exception as e:
+            logger.error(f"处理块 {i+1} 时发生严重错误: {e}，将使用原始块作为备用。")
+            cleaned_chunks.append(chunk)
+
+
+    # 步骤4：合并所有清理过的块
+    final_text = '\n'.join(cleaned_chunks)
+    logger.info(f"步骤4完成: 所有块已处理完毕并合并。最终文本长度: {len(final_text)}")
+    return final_text
+
+
+def run_qa_test():
+    """测试函数1：专门用于解析"投资者关系活动记录表"(Q&A)"""
+    TEST_PDF_PATH = "D:/project/quant_platform/data_processing/reports/test2.pdf"
+
+    print("=" * 60)
+    print("      ▶️ 开始测试【Q&A公告】的AI解析功能...")
+    print(f"      测试文件: {TEST_PDF_PATH}")
+    print("=" * 60)
+
+    if not os.path.exists(TEST_PDF_PATH):
+        logger.error(f"测试失败：找不到Q&A测试文件 -> {TEST_PDF_PATH}")
+        return
+
+    try:
+        with open(TEST_PDF_PATH, 'rb') as f:
+            full_text = "\n".join(
+                [page.extract_text() for page in pdfplumber.open(io.BytesIO(f.read())).pages if page.extract_text()])
+
+        if not full_text:
+            raise ValueError("pdfplumber 未能从PDF中提取任何文本。")
+        logger.info("PDF原始文本提取成功。")
+
+        # 调用Q&A提取AI
+        qa_results = extract_qa_with_ai(full_text)
+
+        print("-" * 60)
+        if qa_results:
+            logger.info(f"AI成功解析出 {len(qa_results)} 个问答对！")
+            print(json.dumps(qa_results, ensure_ascii=False, indent=4))
+        else:
+            logger.warning("AI未能从Q&A公告中解析出任何问答对。")
+    except Exception as e:
+        logger.error(f"处理Q&A公告时发生错误: {e}", exc_info=True)
+
+
+def run_narrative_test():
+    """
+    测试【年报/半年报】的核心章节提取功能（传统方法版）。
+    根据用户要求，暂时回退到稳定可靠的非AI方法。
+    """
+    print_separator("▶️ 开始测试【年报/半年报】的核心章节提取功能...")
+    test_file_path = os.path.join(os.path.dirname(__file__), "reports", "test.pdf")
+    print(f"      测试文件: {test_file_path}")
+    print_separator()
+
+    full_text = extract_pdf_text(test_file_path)
+    if not full_text:
+        logger.error("无法从PDF中提取文本，测试终止。")
+        return
+
+    logger.info("PDF原始文本提取成功。")
+
+    # 步骤1: 使用传统方法提取章节
+    logger.info("使用传统方法提取【管理层讨论与分析】章节...")
+    narrative_section = extract_section_from_text(full_text, "管理层讨论与分析")
+
+    if narrative_section:
+        logger.info(f"章节提取成功，初步长度: {len(narrative_section)}。")
+        
+        # 步骤2: 使用传统方法清理表格
+        logger.info("开始使用传统方法清理表格...")
+        cleaned_text = remove_tables(narrative_section)
+        logger.info(f"表格清理完成，最终内容长度: {len(cleaned_text)}")
+
+        save_path = os.path.join(os.path.dirname(__file__), "extracted_narrative_content.txt")
+        with open(save_path, "w", encoding="utf-8") as f:
+            f.write(cleaned_text)
+        logger.info(f"✅ 提取的完整内容已成功保存到文件: {save_path}")
+    else:
+        logger.error("❌ 未能使用传统方法提取到核心章节。")
+
+
+if __name__ == '__main__':
+    # 配置日志
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    # --- 执行Q&A公告解析测试 ---
+    run_qa_test()
+
+    # --- 添加清晰的分割线 ---
+    print("\n\n" + "#" * 25 + "  切换测试任务  " + "#" * 25 + "\n\n")
+
+    # --- 执行年报/半年报解析测试 ---
+    run_narrative_test()
+
+    print("\n" + "=" * 60)
+    print("所有AI解析测试结束。")

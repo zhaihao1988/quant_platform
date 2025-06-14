@@ -2,7 +2,8 @@
 import os
 from pydantic_settings import BaseSettings
 from typing import Optional
-
+from dotenv import load_dotenv
+load_dotenv()
 class Settings(BaseSettings):
     # ---------- 数据库 ----------
     DB_URL: str = os.getenv("DB_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
@@ -14,7 +15,8 @@ class Settings(BaseSettings):
     EMAIL_USER: str = os.getenv("EMAIL_USER", "zhaihao_n@126.com") # Replace with your actual email
     EMAIL_PASS: str = os.getenv("EMAIL_PASS", "glmdfpoaA8") # **IMPORTANT: Use 126 Mail Authorization Code**
     EMAIL_SMTP_SERVER: str = os.getenv("EMAIL_SMTP_SERVER", "smtp.126.com")
-    EMAIL_SMTP_PORT: int = int(os.getenv("EMAIL_SMTP_PORT", "465")) # Use 465 for SSL by default for 126/163
+    # Use 465 for SSL. Or 25/587 if you prefer STARTTLS.
+    EMAIL_SMTP_PORT: int = int(os.getenv("EMAIL_SMTP_PORT", "465"))
 
     # ---------- Google Custom Search Engine ----------
     GOOGLE_API_KEY: Optional[str] = os.getenv("GOOGLE_API_KEY", "AIzaSyB0Kv14UpjEDv59HEOV4ducTqaPk8633L8")
@@ -31,6 +33,10 @@ class Settings(BaseSettings):
 
     # ---------- Report Saving ----------
     REPORT_SAVE_PATH: str = os.getenv("REPORT_SAVE_PATH", "output")  # <--- ENSURE THIS LINE EXISTS AND IS CORRECT
+
+    # LLM Provider Settings
+    #SILICONFLOW_API_KEY: Optional[str] = os.getenv("SILICONFLOW_API_KEY", "sk-vdyuhzjqucpcqkqebmqbbbgwycgrvltxhklfefpeuaxkvcaf")
+    SILICONFLOW_API_KEY: Optional[str] = None
     # --- Pydantic-Settings Config (应嵌套在 Settings 类内部) ---
     class Config:
         env_file = ".env"
