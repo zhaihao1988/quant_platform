@@ -3,11 +3,11 @@ from datetime import date
 
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, Integer, String, Float, Date, Text, JSON, ForeignKey, Index, \
-    BigInteger, Numeric, DateTime, func  # Added JSON for financial data
+    BigInteger, Numeric, DateTime, func, create_engine, Boolean, UniqueConstraint
 from pgvector.sqlalchemy import Vector # pgvector 导入
 from sqlalchemy.orm import relationship
 
-from config.settings import settings # Import settings to get dimension
+from config.settings import settings, CORRECT_DIMENSION_1024 # Import settings to get dimension and CORRECT_DIMENSION_1024
 
 Base = declarative_base()
 
@@ -112,32 +112,26 @@ class StockDisclosure(Base): # 上市公司公告元数据
     ann_date = Column(Date, nullable=False, index=True)
     url = Column(String(500), nullable=False, unique=True) # 公告URL通常是唯一的
     raw_content = Column(Text, nullable=True) # 全文，用于后续chunk处理
-    # content_vector = Column(Vector(settings.EMBEDDING_DIM), nullable=True) # 已移至 StockDisclosureChunk
     tag = Column(String(50), nullable=True, index=True)
+    
+    # --- 关键修复：添加缺失的关系另一半 ---
+    chunks = relationship(
+        "StockDisclosureChunk", 
+        back_populates="disclosure", 
+        cascade="all, delete-orphan"
+    )
+
 class StockDisclosureChunk(Base): # 公告文本分块及向量化
     __tablename__ = "stock_disclosure_chunk"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    disclosure_id = Column(Integer, ForeignKey('stock_disclosure.id'), nullable=False, index=True) # 自动创建索引
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    disclosure_id = Column(Integer, ForeignKey('stock_disclosure.id', ondelete='CASCADE'), nullable=False)
+    disclosure = relationship("StockDisclosure", back_populates="chunks")
     chunk_order = Column(Integer, nullable=False)
     chunk_text = Column(Text, nullable=False)
-    chunk_vector = Column(Vector(settings.EMBEDDING_DIM), nullable=True)
-    disclosure = relationship("StockDisclosure")
-    disclosure_ann_date = Column(Date, index=True, nullable=False )
-    # __table_args__ 用于定义复合索引、唯一约束等
-    # 尝试在这里定义 HNSW 索引 (需要 pgvector 和 SQLAlchemy 支持)
-    __table_args__ = (
-        Index(
-            'idx_chunk_vector_hnsw_cosine', # 索引名称
-            chunk_vector,                   # 索引的列
-            postgresql_using='hnsw',        # 使用 HNSW 方法
-            postgresql_with={               # HNSW 特定参数
-                'm': 16,
-                'ef_construction': 64
-            },
-            postgresql_ops={'chunk_vector': 'vector_cosine_ops'} # 指定操作符类以支持余弦距离
-        ),
-        Index('idx_chunk_disclosure_order', 'disclosure_id', 'chunk_order', unique=True) # 确保同一公告内块顺序唯一
-    )
+    chunk_vector = Column(Vector(CORRECT_DIMENSION_1024), nullable=True)
+    disclosure_ann_date = Column(Date, nullable=True)
+    # --- 关键修复：移除__table_args__，将索引定义移到类外部，以提高代码的健壮性和清晰度 ---
+    # __table_args__ = ( ... )
 
 class StockShareDetail(Base): # 新增的股本详情表
     __tablename__ = "stock_share_details"
@@ -152,3 +146,18 @@ class StockShareDetail(Base): # 新增的股本详情表
     listing_date = Column(Date)
     data_source_date = Column(Date, default=date.today)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+# --- 关键修复：在类的外部，以更清晰和标准的方式定义索引 ---
+Index('idx_chunk_disclosure_order', StockDisclosureChunk.disclosure_id, StockDisclosureChunk.chunk_order, unique=True)
+
+# --- 关键修复：根据IVFFlat的2000维限制，回退到支持高维向量的HNSW索引 ---
+Index(
+    'idx_chunk_vector_hnsw_cosine', # 恢复为HNSW索引
+    StockDisclosureChunk.chunk_vector,
+    postgresql_using='hnsw',
+    postgresql_with={
+        'm': settings.PGVECTOR_HNSW_M, 
+        'ef_construction': settings.PGVECTOR_HNSW_EF_CONSTRUCTION
+    },
+    postgresql_ops={'chunk_vector': 'vector_cosine_ops'} # 使用余弦距离
+)

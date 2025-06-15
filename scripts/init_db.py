@@ -30,7 +30,8 @@ def create_hnsw_vector_indexes(engine):
     inspector = inspect(engine)
     table_name = StockDisclosureChunk.__tablename__
     column_name = 'chunk_vector'
-    index_name = f'idx_{table_name}_{column_name}_hnsw_cosine'
+    # 索引名称应与 models.py 中定义的名称完全一致
+    index_name = 'idx_chunk_vector_hnsw_cosine'
 
     if table_name not in inspector.get_table_names():
         logger.warning(f"表 {table_name} 不存在，无法为其创建 HNSW 向量索引。")
@@ -38,15 +39,13 @@ def create_hnsw_vector_indexes(engine):
 
     vector_ops_class = 'vector_cosine_ops'
 
-    # --- 开始：修正点 ---
-    # 直接通过属性访问 settings 对象，而不是使用 .get() 方法
+    # 使用 settings.py 中定义的 HNSW 参数
     sql = text(f"""
     CREATE INDEX IF NOT EXISTS {index_name}
     ON {table_name}
     USING hnsw ({column_name} {vector_ops_class})
     WITH (m = {settings.PGVECTOR_HNSW_M}, ef_construction = {settings.PGVECTOR_HNSW_EF_CONSTRUCTION});
     """)
-    # --- 结束：修正点 ---
 
     with engine.begin() as conn:
         try:
@@ -67,11 +66,12 @@ def init_db_main():
         logger.critical("数据库引擎未初始化，无法执行 init_db。")
         return
 
-    logger.info("--- 开始数据库初始化 (重塑版) ---")
+    logger.info("--- 开始数据库初始化 (HNSW 索引版) ---")
 
     # 步骤 1: 基于 SQLAlchemy 模型创建/检查所有表
     logger.info("步骤 1: 基于 SQLAlchemy 模型创建/检查所有表...")
     try:
+        # create_all 会自动创建 models.py 中通过 Index() 定义的索引
         Base.metadata.create_all(bind=engine)
         logger.info("✅ 所有模型定义的表及其常规索引已检查/创建。")
 
@@ -79,11 +79,12 @@ def init_db_main():
         logger.error(f"执行 Base.metadata.create_all 时出错: {e}", exc_info=True)
         return
 
-    # 步骤 2: 创建自定义的 HNSW 向量索引
-    logger.info("步骤 2: 创建/检查自定义的 HNSW 向量索引...")
+    # 步骤 2: 再次确认自定义的 HNSW 向量索引已创建
+    # 这一步提供了双重保障
+    logger.info("步骤 2: 再次确认自定义的 HNSW 向量索引...")
     create_hnsw_vector_indexes(engine)
 
-    logger.info("--- ✅ 数据库初始化完成 (重塑版) ---")
+    logger.info("--- ✅ 数据库初始化完成 (HNSW 索引版) ---")
 
 
 if __name__ == "__main__":

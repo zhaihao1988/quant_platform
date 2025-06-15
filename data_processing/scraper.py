@@ -226,51 +226,101 @@ def reconstruct_paragraphs(text_with_soft_breaks: str) -> str:
 
 def remove_tables(text: str) -> str:
     """
-    【V3 精准版】使用更保守和精确的启发式规则，移除文本化表格，核心是防止误删正文。
+    【V4 用户反馈优化版】使用更保守和精确的启发式规则，移除文本化表格，核心是防止误删正文。
     """
-    logger.info("开始最终清理：使用【V3 精准版】规则移除表格...")
+    logger.info("开始最终清理：使用【V4 用户反馈优化版】规则移除表格...")
     lines = text.split('\n')
     cleaned_lines = []
 
-    # 规则1: 匹配含有至少2个大间距空格的行，这是表格对齐的强特征。
-    column_space_pattern = re.compile(r'\s{3,}')
+    # --- Pre-compiled Regex Patterns for efficiency ---
+    # 规则 1: 匹配含有至少3个大间距空格的行，这是表格对齐的强特征。
+    large_space_pattern = re.compile(r'\s{3,}')
 
-    # 规则2: 匹配包含多个独立数字/百分比的行，现在能正确处理括号和负数
-    # (一个数字/百分比模式，前后可能有空格)
-    numeric_pattern = r'\s*\(?-?[\d,.]+\)?%?\s*'
-    multi_number_pattern = re.compile(f'({numeric_pattern}){{3,}}')  # 匹配连续出现3次以上的数字模式
+    # 规则 2: 匹配包含多个独立数字/百分比的行
+    numeric_pattern_str = r'\s*\(?-?[\d,.]+\)?%?\s*'
+    multi_number_pattern = re.compile(f'({numeric_pattern_str}){{3,}}')  # 匹配连续出现3次以上的数字模式
+    
+    # 规则 3: 匹配标题行, 覆盖"数字."、"中文数字、"、"(一)"、"①"等多种格式
+    title_pattern = re.compile(r'^\s*([（\(]\s*[一二三四五六七八九十\d]+\s*[）\)]|[①-⑩]|[一二三四五六七八九十\d]+[\.、．]|\■|\●|\◆)')
 
     removed_count = 0
     for line in lines:
         stripped_line = line.strip()
 
-        # 如果是空行，直接保留，它可能是段落分隔符
+        # --- 步骤 1: 绝对保留规则 (如果匹配任意一条，则保留该行并跳过后续检查) ---
+        # 1a. 保留空行 (它们通常是段落分隔符)
         if not stripped_line:
             cleaned_lines.append(line)
             continue
-
-        # --- 保护规则：如果像一个完整的句子，则绝对不删除 ---
+        
+        # 1b. 保留看起来像完整句子的行
         if stripped_line.endswith('。'):
             cleaned_lines.append(line)
             continue
-
-        # --- 识别规则 ---
-        # 特征a: 是否包含用于列对齐的大量空格
-        has_large_spacing = bool(column_space_pattern.search(line))
-        # 特征b: 是否包含多列独立的数字
-        has_multi_numbers = bool(multi_number_pattern.search(stripped_line))
-
-        # 只有当【包含大间距】或【包含多列数字】时，才判定为表格行并移除
-        if has_large_spacing or has_multi_numbers:
-            removed_count += 1
-            logger.debug(f"移除表格行: {stripped_line[:100]}...")
-        else:
+            
+        # 1c. 保留被识别为标题的行
+        if title_pattern.match(stripped_line):
             cleaned_lines.append(line)
+            continue
 
-    logger.info(f"使用【V3 精准版】规则移除了 {removed_count} 行疑似表格的行。")
+        # --- 步骤 2: 移除规则 (通过了步骤1的行，现在是候选移除对象) ---
+        
+        # --- 规则 A (来自您的反馈): 移除短的、且有大空格的行 ---
+        # "去掉非标题行...充斥超过多个空格...总字数小于15"
+        # "非标题行" 的部分已经在上面的 1c 规则中处理了。
+        if large_space_pattern.search(line) and len(stripped_line) < 15:
+            logger.debug(f"Removing line (reason: user rule - short with large space): {stripped_line[:100]}...")
+            removed_count += 1
+            continue # 移除并处理下一行
+
+        # --- 规则 B: 移除包含多个数字的行 (表格行的强特征) ---
+        if multi_number_pattern.search(stripped_line):
+            logger.debug(f"Removing line (reason: multiple numbers): {stripped_line[:100]}...")
+            removed_count += 1
+            continue # 移除并处理下一行
+            
+        # --- 规则 C (原有逻辑的优化): 移除有大空格但本身不短的行，
+        # **仅当**它不包含太多文本内容时。这可以防止误删包含特殊格式的长句子。
+        if large_space_pattern.search(line) and len(re.findall(r'[\u4e00-\u9fa5]', stripped_line)) < 10:
+            logger.debug(f"Removing line (reason: large space with few Chinese chars): {stripped_line[:100]}...")
+            removed_count += 1
+            continue
+
+        # --- 步骤 3: 如果没有任何移除规则匹配，则保留该行 ---
+        cleaned_lines.append(line)
+
+    logger.info(f"使用【V4 用户反馈优化版】规则移除了 {removed_count} 行疑似表格的行。")
     final_text = "\n".join(cleaned_lines)
     # 最后再规整一下可能因移除表格而产生的多余空行
     return re.sub(r'\n{3,}', '\n\n', final_text)
+
+def extract_and_clean_narrative_section(full_text: str, section_title: str) -> Optional[str]:
+    """
+    【V4 封装流程】
+    封装了提取并清理叙述性章节（如"管理层讨论与分析"）的完整传统流程。
+    1. 按标题提取章节 (extract_section_from_text)
+    2. 移除表格内容 (remove_tables)
+    3. 重构段落，修复软换行 (reconstruct_paragraphs)
+    """
+    logger.info(f"执行传统方法流水线，提取并清理章节: '{section_title}'")
+
+    # 步骤 1: 提取章节
+    narrative_section = extract_section_from_text(full_text, section_title)
+    if not narrative_section:
+        # extract_section_from_text 内部已有日志，此处不再重复
+        return None
+    logger.info(f"✅ 步骤 1/3: 章节提取成功，初步长度: {len(narrative_section)}")
+
+    # 步骤 2: 清理表格
+    text_without_tables = remove_tables(narrative_section)
+    logger.info(f"✅ 步骤 2/3: 表格清理完成，内容长度: {len(text_without_tables)}")
+
+    # 步骤 3: 重构段落
+    final_text = reconstruct_paragraphs(text_without_tables)
+    logger.info(f"✅ 步骤 3/3: 段落重构完成，最终长度: {len(final_text)}")
+
+    return final_text
+
 def extract_section_from_text(text: str, section_title: str) -> Optional[str]:
     """
     【最终版】章节内容提取。
@@ -503,25 +553,29 @@ def fetch_announcement_text(detail_url: str, title: str, tag: Optional[str] = No
         logger.error(f"最终未能为URL获取到PDF内容: {detail_url}")
         return None
 
-    # 使用 pdfplumber 提取文本 (因为它更稳健)
+    # --- 【V2 回退流程】 ---
+    # 回退到之前稳定的、基于文本重复的页眉页脚清理逻辑。
     try:
-        # 重置流的位置，以便pdfplumber可以读取
+        # 步骤 1: 识别通用行（页眉/页脚）
+        common_lines = identify_common_lines(pdf_content_stream)
+        
+        # 步骤 2: 重置流并提取全部文本
         pdf_content_stream.seek(0)
-        common_items = identify_common_lines(pdf_content_stream)
-        
-        pdf_content_stream.seek(0) # 再次重置
-        full_text = ""
         with pdfplumber.open(pdf_content_stream) as pdf:
-            full_text = "\n".join([page.extract_text() for page in pdf.pages if page.extract_text()])
+            full_text = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
         
-        # 清理页眉页脚
-        cleaned_text = clean_text_with_blacklist(full_text, common_items)
+        if not full_text:
+            logger.warning("pdfplumber 未能提取到任何文本。")
+            return None
+
+        # 步骤 3: 使用黑名单清理文本
+        cleaned_text = clean_text_with_blacklist(full_text, common_lines)
         
         logger.info(f"成功提取并清理文本 (最终长度: {len(cleaned_text)})")
         return cleaned_text
 
     except Exception as e:
-        logger.error(f"使用pdfplumber处理PDF时发生错误: {e}", exc_info=True)
+        logger.error(f"在主文本提取流程中发生未知错误: {e}", exc_info=True)
         return None
 
 
@@ -599,13 +653,17 @@ def extract_qa_from_text(text: str) -> List[Dict[str, str]]:
 
 
 
-def extract_qa_with_ai(full_text: str) -> list[dict[str, str]]:
+def extract_qa_with_ai(full_text: str, model_override: Optional[str] = None) -> list[dict[str, str]]:
     """
-    【AI封装版 V2.1】修正了AI Provider的调用方式。
+    【AI封装版 V3.2 - 恢复为大模型Prompt】
+    使用 LLMProviderFactory 获取提供商，并允许在调用时覆盖模型。
+    使用带示例的、更适合大模型的 "黄金Prompt V2"。
     """
-    logger.info("开始使用【封装的AI Provider】解析Q&A...")
+    logger.info("开始使用【工厂模式+大模型Prompt】的AI Provider解析Q&A...")
+    if model_override:
+        logger.info(f"此次调用将使用覆盖模型: {model_override}")
 
-    # 准备"黄金Prompt V2"，这部分不变
+    # --- 恢复为带示例的 "黄金Prompt V2" ---
     prompt = f"""
     你是一个精准的文本处理程序，你的唯一任务是严格按照指令提取数据。
 
@@ -637,15 +695,11 @@ def extract_qa_with_ai(full_text: str) -> list[dict[str, str]]:
     """
 
     try:
-        # ↓↓↓↓↓↓  这是本次最关键的修改  ↓↓↓↓↓↓
-        # 1. 直接导入 SiliconFlowProvider 这个类
-        from core.llm_provider import SiliconFlowProvider
+        # --- 使用工厂获取 Provider ---
+        from core.llm_provider import LLMProviderFactory
+        llm_provider = LLMProviderFactory.get_provider()
 
-        # 2. 直接实例化这个类，而不是通过工厂函数
-        llm_provider = SiliconFlowProvider()
-        # ↑↑↑↑↑↑        修改完成        ↑↑↑↑↑↑
-
-        ai_response_text = llm_provider.generate(prompt)
+        ai_response_text = llm_provider.generate(prompt, model=model_override)
 
         if not ai_response_text:
             logger.error("AI Provider 未能返回任何内容。")
@@ -669,6 +723,7 @@ def extract_qa_with_ai(full_text: str) -> list[dict[str, str]]:
     except Exception as e:
         logger.error(f"在AI解析流程中发生错误: {e}", exc_info=True)
         return []
+
 # scraper.py (请用这个AI测试版本替换文件末尾的 if __name__ == '__main__' 部分)
 # data_processing/scraper.py (请添加这个新函数)
 
@@ -695,10 +750,10 @@ def _chunk_text(text: str, max_chunk_size: int = 10000) -> list[str]:
 
 def extract_narrative_with_ai(full_text: str) -> Optional[str]:
     """
-    【AI混合策略V3 - 分块处理终极版】
-    先用传统方法粗定位，然后将大文本分块，逐块交由AI清理，最后合并，以解决网络不稳定问题。
+    【AI混合策略V4 - 工厂模式】
+    使用 LLMProviderFactory，使其也能适应不同的后端。
     """
-    logger.info("开始使用【AI混合策略V3-分块版】提取年报/半年报核心章节...")
+    logger.info("开始使用【AI混合策略V4-工厂模式】提取年报/半年报核心章节...")
 
     # 步骤1：先用传统方法进行"粗剪"，找到大概范围
     logger.info("步骤1: 使用传统方法进行初步章节定位...")
@@ -730,13 +785,17 @@ def extract_narrative_with_ai(full_text: str) -> Optional[str]:
     {{text_chunk}}
     """
 
-    ai_provider = SiliconFlowProvider()
+    # --- 关键修改：使用工厂获取 Provider ---
+    from core.llm_provider import LLMProviderFactory
+    ai_provider = LLMProviderFactory.get_provider()
+
     for i, chunk in enumerate(chunks):
         logger.info(f"步骤3: 正在处理块 {i+1}/{len(chunks)}...")
         prompt = chunk_prompt_template.format(text_chunk=chunk)
         
         try:
-            cleaned_chunk = ai_provider.generate(prompt, model="Qwen/Qwen3-8B")
+            # 注意：这里我们让它使用提供商的默认模型，不进行覆盖
+            cleaned_chunk = ai_provider.generate(prompt)
             if cleaned_chunk:
                 cleaned_chunks.append(cleaned_chunk)
                 logger.info(f"块 {i+1} 清理成功。")
@@ -804,26 +863,18 @@ def run_narrative_test():
         logger.error("无法从PDF中提取文本，测试终止。")
         return
 
-    logger.info("PDF原始文本提取成功。")
+    logger.info("PDF原始文本提取成功。现在调用封装好的流水线函数...")
 
-    # 步骤1: 使用传统方法提取章节
-    logger.info("使用传统方法提取【管理层讨论与分析】章节...")
-    narrative_section = extract_section_from_text(full_text, "管理层讨论与分析")
+    # 调用新的、封装好的流水线函数
+    final_text = extract_and_clean_narrative_section(full_text, "管理层讨论与分析")
 
-    if narrative_section:
-        logger.info(f"章节提取成功，初步长度: {len(narrative_section)}。")
-        
-        # 步骤2: 使用传统方法清理表格
-        logger.info("开始使用传统方法清理表格...")
-        cleaned_text = remove_tables(narrative_section)
-        logger.info(f"表格清理完成，最终内容长度: {len(cleaned_text)}")
-
+    if final_text:
         save_path = os.path.join(os.path.dirname(__file__), "extracted_narrative_content.txt")
         with open(save_path, "w", encoding="utf-8") as f:
-            f.write(cleaned_text)
+            f.write(final_text)
         logger.info(f"✅ 提取的完整内容已成功保存到文件: {save_path}")
     else:
-        logger.error("❌ 未能使用传统方法提取到核心章节。")
+        logger.error("❌ 未能使用封装流水线提取到核心章节。")
 
 
 if __name__ == '__main__':
