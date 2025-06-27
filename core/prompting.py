@@ -19,6 +19,8 @@ from data_processing.loader import load_price_data, load_multiple_financial_repo
 from integrations.web_search import get_web_search_results
 from core.llm_provider import LLMProviderFactory
 from rag.embeddings import Embedder
+# --- V3: Import the new high-value disclosure getter ---
+from db.crud import get_high_value_disclosures_for_summary
 
 logger = logging.getLogger(__name__)
 
@@ -84,39 +86,44 @@ def _retrieve_relevant_chunks(
     logger.info(f"为查询 '{query_text[:50]}...' 检索到 {len(formatted_results)} 个文本块 (top_k={top_k}, symbol={symbol})")
     return formatted_results
 
-def _get_high_value_disclosures(db: Session, symbol: str, num_reports: int = 3) -> List[str]:
-    """获取近期最高价值的公告内容用于主题发现。"""
-    logger.info(f"正在为 {symbol} 提取近期高价值公告...")
-    one_year_ago = date.today() - timedelta(days=365)
-    
-    # 优先查找年报和半年报
-    keywords = ['年度报告', '半年度报告']
-    clauses = [StockDisclosure.title.ilike(f'%{kw}%') for kw in keywords]
-    
-    recent_reports = db.query(
-        StockDisclosure.raw_content
-    ).filter(
-        StockDisclosure.symbol == symbol,
-        StockDisclosure.ann_date >= one_year_ago,
-        and_(StockDisclosure.raw_content.isnot(None), StockDisclosure.raw_content != ''),
-        or_(*clauses)
-    ).order_by(
-        desc(StockDisclosure.ann_date)
-    ).limit(num_reports).all()
-    
-    contents = [report.raw_content for report in recent_reports]
-    logger.info(f"为主题发现提取了 {len(contents)} 份高价值报告。")
-    return contents
+# --- V3: This function is being deprecated in favor of the one from crud.py ---
+# def _get_high_value_disclosures(db: Session, symbol: str, num_reports: int = 3) -> List[str]:
+#     """获取近期最高价值的公告内容用于主题发现。"""
+#     logger.info(f"正在为 {symbol} 提取近期高价值公告...")
+#     one_year_ago = date.today() - timedelta(days=365)
+#     
+#     # 优先查找年报和半年报
+#     keywords = ['年度报告', '半年度报告']
+#     clauses = [StockDisclosure.title.ilike(f'%{kw}%') for kw in keywords]
+#     
+#     recent_reports = db.query(
+#         StockDisclosure.raw_content
+#     ).filter(
+#         StockDisclosure.symbol == symbol,
+#         StockDisclosure.ann_date >= one_year_ago,
+#         and_(StockDisclosure.raw_content.isnot(None), StockDisclosure.raw_content != ''),
+#         or_(*clauses)
+#     ).order_by(
+#         desc(StockDisclosure.ann_date)
+#     ).limit(num_reports).all()
+#     
+#     contents = [report.raw_content for report in recent_reports]
+#     logger.info(f"为主题发现提取了 {len(contents)} 份高价值报告。")
+#     return contents
 
 # --- LLM 交互与内容格式化 ---
-def _call_llm(prompt: str, model_override: Optional[str] = None) -> str:
-    """封装 LLM 调用，使用 LLMProviderFactory。"""
+def _call_llm(prompt: str, model_override: Optional[str] = None, json_mode: bool = False) -> str:
+    """
+    封装 LLM 调用，使用 LLMProviderFactory。
+    新增 json_mode 支持，如果 provider 支持，会使用 JSON 模式。
+    """
     provider = LLMProviderFactory.get_provider()
     model_to_use = model_override if model_override else None
     
-    logger.info(f"正在调用 LLM Provider: {type(provider).__name__} (模型: {model_to_use or '默认'})")
+    logger.info(f"正在调用 LLM Provider: {type(provider).__name__} (模型: {model_to_use or '默认'}, JSON Mode: {json_mode})")
     try:
-        response = provider.generate(prompt, model=model_to_use)
+        # 假设 provider 的 generate 方法接受一个 json_mode 参数
+        response = provider.generate(prompt, model=model_to_use, json_mode=json_mode)
         if not response or not response.strip():
             logger.warning("LLM 返回了空响应。")
             return "错误: LLM 返回空响应。"
@@ -125,65 +132,93 @@ def _call_llm(prompt: str, model_override: Optional[str] = None) -> str:
         logger.error(f"调用 LLM 时发生错误: {e}", exc_info=True)
         return f"错误: LLM 调用失败 - {e}"
 
-def _discover_topics_with_llm(db: Session, symbol: str, company_name: str) -> List[str]:
-    """第一阶段：使用 LLM 从近期报告中动态发现关键主题。"""
-    logger.info(f"--- RAG 第一阶段: 为 {company_name} ({symbol}) 进行主题发现 ---")
-    
-    # 1. 获取近期高价值公告内容
-    report_contents = _get_high_value_disclosures(db, symbol)
-    if not report_contents:
-        logger.warning("未找到近期高价值报告，无法进行主题发现。将使用预设的通用主题。")
-        return ["主营业务与竞争力", "风险因素", "近期发展与未来展望"]
-
-    # 限制内容长度以避免超出 LLM 上下文
-    combined_text = "\n\n---\n\n".join(report_contents)[:15000]
-
-    # 2. 构建主题发现的 Prompt
-    prompt = f"""
-    你是一位顶级的行业分析师，擅长从复杂的文本中快速识别核心要点。
-    请仔细阅读以下关于公司「{company_name}」的最新报告内容，然后识别并列出该公司当前最重要的 3 到 5 个业务重点、战略方向或关键主题。
-
-    你的任务要求：
-    1.  **精确提炼**: 提炼出最核心的主题，避免宽泛或通用的描述。
-    2.  **结果形式**: 必须以 Python 列表的字符串形式返回，例如：["智能底盘系统业务", "海外市场扩张策略", "人形机器人谐波减速器研发", "原材料成本控制与毛利率"]。
-    3.  **禁止额外解释**: 除了这个列表本身，不要添加任何前言、解释或无关的文字。
-
-    --- 需要分析的报告内容 ---
-    {combined_text}
-    --- 报告内容结束 ---
-
-    请严格按要求输出 Python 列表格式的字符串。
+def _create_research_plan(db: Session, symbol: str, company_name: str) -> Optional[Dict[str, List[str]]]:
     """
+    【V3 - 核心变革】第一阶段：使用LLM创建一个包含内部检索主题和外部搜索查询的"研究计划"。
+    """
+    logger.info(f"--- RAG V3 Stage 1: Creating Research Plan for {company_name} ({symbol}) ---")
+
+    # 1. 使用新的 crud 函数获取高价值公告内容
+    # 我们只关心内容，所以将它们提取出来
+    disclosures = get_high_value_disclosures_for_summary(db, symbol, num_reports=3)
+    if not disclosures:
+        logger.warning("No high-value reports found for research plan creation. Aborting.")
+        return None
     
-    # 3. 调用 LLM (使用用户指定的模型)
-    logger.info("调用 LLM 进行主题发现...")
-    response_str = _call_llm(prompt, model_override="Qwen/Qwen3-8B")
+    # 将公告内容和标题格式化后合并，为LLM提供更丰富的上下文
+    report_contexts = []
+    for d in disclosures:
+        content_snippet = d.raw_content[:4000] # 限制每个公告的长度
+        report_contexts.append(f"公告标题:《{d.title}》(发布于 {d.ann_date})\n内容摘要:\n{content_snippet}")
+    combined_text = "\n\n---\n\n".join(report_contexts)
+
+    # 2. 构建新的"研究计划" Prompt
+    prompt = f"""
+    你是顶尖的金融分析师，任务是为深入研究「{company_name}」制定一份周密的"研究计划"。
+    请仔细阅读下方提供的该公司近期核心公告摘要。
+
+    你的任务是输出一个JSON对象，其中包含两个关键部分：
+    1.  `topics_for_internal_retrieval`: 一个包含3-5个核心【主题】的列表。这些主题将用于从我们【内部的历史公告数据库】中进行深入的语义搜索。主题应具有代表性，能覆盖公司的核心业务、战略、风险和机遇。
+    2.  `queries_for_web_search`: 一个包含3-5个精准【搜索查询】的列表。这些查询将用于在【外部互联网】上获取最新的新闻、行业动态或竞争信息，以补充内部数据的不足。查询应具体、可搜索，旨在发现最新的、可能未在历史公告中体现的信息。
+
+    **输出格式要求:**
+    - 必须严格返回一个有效的JSON对象。
+    - JSON对象必须包含 `topics_for_internal_retrieval` 和 `queries_for_web_search` 两个键，其值均为字符串列表。
+    - 不要添加任何解释或无关文字，直接输出JSON对象。
+
+    **示例输出:**
+    {{
+        "topics_for_internal_retrieval": [
+            "空气悬挂系统的技术研发与产能布局",
+            "海外市场特别是北美地区的业务拓展情况",
+            "机器人核心部件（如谐波减速器）的业务进展与挑战",
+            "原材料价格波动对毛利率的影响及应对措施"
+        ],
+        "queries_for_web_search": [
+            "中鼎股份 空气悬挂系统 新能源车企客户 2024",
+            "AMK德国公司整合最新进展及协同效应",
+            "汽车零部件行业海外并购风险与机遇",
+            "人形机器人行业对谐波减速器的最新需求"
+        ]
+    }}
+
+    --- 需要分析的公告摘要 ---
+    {combined_text}
+    --- 公告摘要结束 ---
+
+    请严格按要求输出JSON对象。
+    """
+
+    # 3. 调用 LLM (使用支持JSON模式的调用)
+    logger.info("Calling LLM to create the research plan...")
+    response_str = _call_llm(prompt, model_override="Qwen/Qwen3-8B", json_mode=True)
 
     if response_str.startswith("错误:"):
-        logger.error(f"主题发现失败: {response_str}。将使用预设的通用主题。")
-        return ["主营业务与竞争力", "风险因素", "近期发展与未来展望"]
+        logger.error(f"Research plan creation failed: {response_str}.")
+        return None
 
-    # 4. 解析 LLM 返回的列表字符串
+    # 4. 解析 LLM 返回的 JSON
     try:
-        # 鲁棒的解析，提取中括号内的内容
-        match = re.search(r'\[(.*?)\]', response_str, re.DOTALL)
-        if not match:
-            # 如果没有找到中括号，就按行分割
-            logger.warning(f"无法从 LLM 响应中解析出列表格式，将尝试按行分割。原始响应: '{response_str}'")
-            # 清理可能的 markdown 标记和引号
-            topics = [line.strip().replace('*', '').replace('-', '').replace('"', '').replace("'", "").strip() for line in response_str.split('\n') if line.strip()]
-            return topics if topics else []
+        # 尝试从返回的文本中找到json对象
+        json_match = re.search(r'\{.*\}', response_str, re.DOTALL)
+        if not json_match:
+            raise json.JSONDecodeError("No JSON object found in the response.", response_str, 0)
+        
+        plan = json.loads(json_match.group(0))
 
-        list_str = f"[{match.group(1)}]"
-        topics = json.loads(list_str)
-        if isinstance(topics, list):
-            logger.info(f"成功发现动态主题: {topics}")
-            return topics
+        if isinstance(plan, dict) and \
+           'topics_for_internal_retrieval' in plan and \
+           'queries_for_web_search' in plan and \
+           isinstance(plan['topics_for_internal_retrieval'], list) and \
+           isinstance(plan['queries_for_web_search'], list):
+            logger.info(f"Successfully created research plan: {plan}")
+            return plan
         else:
-            raise TypeError("解析结果不是列表")
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.error(f"解析 LLM 返回的主题列表时失败: {e}。原始响应: '{response_str}'。将使用预设主题。")
-        return ["主营业务与竞争力", "风险因素", "近期发展与未来展望"]
+            logger.error(f"Parsed JSON does not match the required structure. Parsed data: {plan}")
+            return None
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse research plan from LLM response: {e}. Raw response: '{response_str}'")
+        return None
 
 
 def format_kb_results(chunk_results: List[Dict[str, Any]]) -> str:
@@ -403,10 +438,13 @@ def generate_stock_report_prompt(
 # --- 主报告生成函数 ---
 def generate_stock_report(db: Session, symbol: str) -> Optional[str]:
     """
-    【V2 - 智能版】
-    编排整个 RAG 流程，包括动态主题发现、分时加权检索和最终报告生成。
+    【V3 - 研究计划驱动版】
+    编排整个 RAG 流程，包括：
+    1.  LLM生成研究计划（内部主题 + 外部查询）。
+    2.  根据计划并行执行信息检索。
+    3.  聚合所有信息，生成最终报告。
     """
-    logger.info(f"--- 开始为股票代码 {symbol} 生成智能分析报告 ---")
+    logger.info(f"--- 开始为股票代码 {symbol} 生成【V3 研究计划驱动版】分析报告 ---")
 
     # 1. 获取基本信息
     stock_info = db.query(StockList).filter(StockList.code == symbol).first()
@@ -414,58 +452,71 @@ def generate_stock_report(db: Session, symbol: str) -> Optional[str]:
     industry = stock_info.industry if stock_info else "未知行业"
     logger.info(f"标的: {company_name} ({symbol}), 行业: {industry}")
 
-    # 2. RAG 第一阶段：动态主题发现
-    dynamic_topics = _discover_topics_with_llm(db, symbol, company_name)
-    if not dynamic_topics:
-        logger.error("无法发现任何分析主题，报告生成中止。")
-        return None
+    # 2. RAG V3 第一阶段：创建研究计划
+    research_plan = _create_research_plan(db, symbol, company_name)
+    if not research_plan:
+        logger.error("无法创建研究计划，报告生成中止。")
+        return "错误：未能创建研究计划，无法生成报告。"
 
-    # 3. RAG 第二阶段：围绕动态主题进行深度、分时加权的信息挖掘
-    logger.info(f"--- RAG 第二阶段: 围绕动态主题进行深度挖掘 ---")
-    today = date.today()
-    time_buckets = {
-        "近期 (1年内)": {'start': today - timedelta(days=365), 'end': today, 'k': 3},
-        "中期 (1-3年前)": {'start': today - timedelta(days=3*365), 'end': today - timedelta(days=365), 'k': 2},
-        "远期 (3年前)": {'start': None, 'end': today - timedelta(days=3*365), 'k': 1},
-    }
-    
-    kb_context_parts = {}
-    retrieved_chunk_ids = set()
+    internal_topics = research_plan.get("topics_for_internal_retrieval", [])
+    web_queries = research_plan.get("queries_for_web_search", [])
 
-    for topic in dynamic_topics:
-        logger.info(f"正在为主题 '{topic}' 检索相关信息...")
-        topic_context = ""
-        for bucket_name, params in time_buckets.items():
-            chunks = _retrieve_relevant_chunks(db, symbol, topic, params['k'], params['start'], params['end'])
-            unique_chunks = []
-            for chunk in chunks:
-                if chunk['id'] not in retrieved_chunk_ids:
-                    unique_chunks.append(chunk)
-                    retrieved_chunk_ids.add(chunk['id'])
-            
-            if unique_chunks:
-                topic_context += f"--- {bucket_name} ---\n"
-                topic_context += format_kb_results(unique_chunks)
-        
-        if topic_context:
-            kb_context_parts[topic] = topic_context
+    # 3. RAG V3 第二阶段：根据计划执行信息挖掘
+    logger.info(f"--- RAG V3 Stage 2: Executing Research Plan ---")
 
+    # 3a. 内部知识库检索
     full_kb_context = ""
-    for topic, context in kb_context_parts.items():
-        full_kb_context += f"\n**分析主题: {topic}**\n{context}"
+    if internal_topics:
+        today = date.today()
+        time_buckets = {
+            "近期 (1年内)": {'start': today - timedelta(days=365), 'end': today, 'k': 3},
+            "中期 (1-3年前)": {'start': today - timedelta(days=3*365), 'end': today - timedelta(days=365), 'k': 2},
+            "远期 (3年前)": {'start': None, 'end': today - timedelta(days=3*365), 'k': 1},
+        }
+        kb_context_parts = {}
+        retrieved_chunk_ids = set()
+
+        for topic in internal_topics:
+            logger.info(f"正在为内部主题 '{topic}' 检索相关信息...")
+            topic_context = ""
+            for bucket_name, params in time_buckets.items():
+                chunks = _retrieve_relevant_chunks(db, symbol, topic, params['k'], params['start'], params['end'])
+                unique_chunks = [c for c in chunks if c['id'] not in retrieved_chunk_ids]
+                for c in unique_chunks:
+                    retrieved_chunk_ids.add(c['id'])
+                
+                if unique_chunks:
+                    topic_context += f"--- {bucket_name} ---\n"
+                    topic_context += format_kb_results(unique_chunks)
+            
+            if topic_context:
+                kb_context_parts[topic] = topic_context
+
+        for topic, context in kb_context_parts.items():
+            full_kb_context += f"\n**分析主题: {topic}**\n{context}"
+    
     if not full_kb_context:
         full_kb_context = "本地知识库: 未检索到相关历史公告内容。\n"
 
-    # 4. 加载其他上下文数据
+    # 3b. 外部网络搜索
+    all_web_results = []
+    if web_queries:
+        for query in web_queries:
+            logger.info(f"正在为外部查询 '{query}' 执行网络搜索...")
+            # 限制每个查询返回的结果数量，例如 top_n=3
+            web_results = get_web_search_results(query, top_n=3)
+            if web_results:
+                all_web_results.extend(web_results)
+    web_context = format_web_results(all_web_results)
+
+
+    # 4. 加载其他固定上下文数据 (股价和财务)
     price_df = load_price_data(symbol, window=30)
     price_context = format_price_data(price_df)
     
     financial_benefit_reports = load_multiple_financial_reports(symbol, report_type='benefit', num_years=3)
     financial_context = format_multiple_financial_reports(financial_benefit_reports, 'benefit')
     
-    web_results = get_web_search_results(symbol)
-    web_context = format_web_results(web_results)
-
     # 5. 构建并保存最终的 Prompt
     final_prompt = generate_stock_report_prompt(
         symbol=symbol, company_name=company_name, industry=industry,
@@ -484,7 +535,7 @@ def generate_stock_report(db: Session, symbol: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"保存调试 Prompt 时出错: {e}", exc_info=True)
 
-    # 6. 调用 LLM 生成最终报告 (使用默认模型)
+    # 6. 调用 LLM 生成最终报告
     logger.info("调用 LLM 生成最终分析报告...")
     generated_report = _call_llm(final_prompt)
     

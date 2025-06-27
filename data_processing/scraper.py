@@ -14,6 +14,8 @@ from urllib.parse import urljoin, urlparse, parse_qs
 import pdfplumber
 
 from core.llm_provider import SiliconFlowProvider
+# --- 关键修改：从新的 prompting 文件导入 Prompts ---
+from core.prompting import QA_EXTRACTION_PROMPT_V1, NARRATIVE_CLEANUP_PROMPT
 
 # --- Selenium Imports ---
 try:
@@ -630,69 +632,18 @@ def _parse_qa_by_prefix(text: str) -> List[Dict[str, str]]:
     return qa_pairs
 
 
-def extract_qa_from_text(text: str) -> List[Dict[str, str]]:
-    """
-    【V3 智能调度器】自动检测Q&A格式并调用相应的解析器。
-    """
-    logger.info("开始使用【V3 智能调度版】Q&A解析器...")
-
-    # --- 格式检测与调度 ---
-    # 策略1：检测是否存在数字编号格式 (e.g., "1、", "2.")
-    if re.search(r"^\s*\d+[\.、．]", text, re.MULTILINE):
-        return _parse_numbered_qa(text)
-
-    # 策略2：如果策略1不匹配，则检测是否存在Q:/A:前缀格式
-    # 为避免误判，可以要求Q:和A:同时出现
-    elif 'Q:' in text and 'A:' in text:
-        return _parse_qa_by_prefix(text)
-
-    # 如果两种格式都未检测到
-    else:
-        logger.warning("在文本中未能检测到已知的问答格式 (数字编号 或 Q:/A:前缀)。")
-        return []
-
-
-
 def extract_qa_with_ai(full_text: str, model_override: Optional[str] = None) -> list[dict[str, str]]:
     """
-    【AI封装版 V3.2 - 恢复为大模型Prompt】
+    【AI封装版 V3.3 - 使用Prompt模块】
     使用 LLMProviderFactory 获取提供商，并允许在调用时覆盖模型。
-    使用带示例的、更适合大模型的 "黄金Prompt V2"。
+    使用从 core.prompting 导入的标准化Prompt。
     """
-    logger.info("开始使用【工厂模式+大模型Prompt】的AI Provider解析Q&A...")
+    logger.info("开始使用【工厂模式+Prompt模块】的AI Provider解析Q&A...")
     if model_override:
         logger.info(f"此次调用将使用覆盖模型: {model_override}")
 
-    # --- 恢复为带示例的 "黄金Prompt V2" ---
-    prompt = f"""
-    你是一个精准的文本处理程序，你的唯一任务是严格按照指令提取数据。
-
-    **输出要求 (必须严格遵守):**
-    1.  **必须**返回一个符合JSON规范的数组（JSON Array）。
-    2.  数组中的每个元素都是一个包含 "question" 和 "answer" 两个键的JSON对象。
-    3.  **不要**对原文进行任何形式的总结、分析、评价或改写。只需原文提取。
-    4.  **不要**在JSON内容之外添加任何解释性文字、标题或Markdown标记（如 ```json）。
-    5.  如果【源文本】中没有有效的问答内容，**必须**返回一个空的JSON数组 `[]`。
-
-    ---
-    【示例1】
-    输入: "1、公司的发展规划？\\n答：公司计划..."
-    输出:
-    [
-        {{"question": "公司的发展规划？", "answer": "公司计划..."}}
-    ]
-    ---
-    【示例2】
-    输入: "Q: 海外业务如何？ A: 海外业务稳定增长..."
-    输出:
-    [
-        {{"question": "海外业务如何？", "answer": "海外业务稳定增长..."}}
-    ]
-    ---
-
-    【源文本】
-    {full_text}
-    """
+    # --- 使用从模块导入的 "黄金Prompt V1" ---
+    prompt = QA_EXTRACTION_PROMPT_V1.format(full_text=full_text)
 
     try:
         # --- 使用工厂获取 Provider ---
@@ -724,10 +675,6 @@ def extract_qa_with_ai(full_text: str, model_override: Optional[str] = None) -> 
         logger.error(f"在AI解析流程中发生错误: {e}", exc_info=True)
         return []
 
-# scraper.py (请用这个AI测试版本替换文件末尾的 if __name__ == '__main__' 部分)
-# data_processing/scraper.py (请添加这个新函数)
-
-# data_processing/scraper.py
 
 def _chunk_text(text: str, max_chunk_size: int = 10000) -> list[str]:
     """
@@ -750,10 +697,10 @@ def _chunk_text(text: str, max_chunk_size: int = 10000) -> list[str]:
 
 def extract_narrative_with_ai(full_text: str) -> Optional[str]:
     """
-    【AI混合策略V4 - 工厂模式】
-    使用 LLMProviderFactory，使其也能适应不同的后端。
+    【AI混合策略V4.1 - 工厂模式+Prompt模块】
+    使用 LLMProviderFactory，并从 core.prompting 导入清理提示。
     """
-    logger.info("开始使用【AI混合策略V4-工厂模式】提取年报/半年报核心章节...")
+    logger.info("开始使用【AI混合策略V4.1-工厂模式+Prompt模块】提取年报/半年报核心章节...")
 
     # 步骤1：先用传统方法进行"粗剪"，找到大概范围
     logger.info("步骤1: 使用传统方法进行初步章节定位...")
@@ -772,18 +719,8 @@ def extract_narrative_with_ai(full_text: str) -> Optional[str]:
     # 步骤3：逐个处理每个文本块
     cleaned_chunks = []
     # 这个提示词现在只专注于清理，因为边界已经由传统方法确定
-    chunk_prompt_template = f"""
-    你是一位专业的财报文本清理专家。请对以下【部分章节内容】执行唯一的任务：
-    
-    **清理规则 (必须严格遵守):**
-    1.  **移除表格**: 精确地识别并删除所有数据表格行。表格的典型特征是：一行内包含多个用大量空白字符隔开的词语、数字或百分比。
-    2.  **保留正文**: 【必须】原封不动地保留所有叙述性的、成段的文字，即使句子中包含数字。
-    3.  **禁止任何改写**: 严禁进行任何形式的总结、归纳、分析或对原文进行任何修改。
-    4.  **纯净输出**: 直接返回清理后的文字，不要包含任何解释、前言或结尾。
-
-    ---需要清理的文本块如下---
-    {{text_chunk}}
-    """
+    # --- 关键修改：直接使用导入的 NARRATIVE_CLEANUP_PROMPT ---
+    chunk_prompt_template = NARRATIVE_CLEANUP_PROMPT
 
     # --- 关键修改：使用工厂获取 Provider ---
     from core.llm_provider import LLMProviderFactory

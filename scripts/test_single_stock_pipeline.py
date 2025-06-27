@@ -53,7 +53,8 @@ def get_target_disclosures_for_processing(db_session, symbol: str) -> List[Stock
             three_years_ago_date = (now - timedelta(days=3 * 365 + 1)).date()  # 粗略计算
 
         annual_semi_keywords = ['年度报告', '半年度报告']
-        other_relevant_keywords = ['调研'] # 只处理调研活动
+        # 保留"调研"关键词，因为它是我们关注的重点
+        other_relevant_keywords = ['调研'] 
 
         # 定义不想要的公告标题关键词
         exclusion_keywords = [
@@ -72,14 +73,14 @@ def get_target_disclosures_for_processing(db_session, symbol: str) -> List[Stock
                 )
             )
 
-        # 条件组2：最近1年的其他相关关键词公告
-        for kw in other_relevant_keywords:
-            filter_conditions.append(
-                and_(
-                    StockDisclosure.tag.ilike(f'%{kw}%'),
-                    StockDisclosure.ann_date >= one_year_ago_date
-                )
+        # 条件组2：最近1年的调研活动 (根据用户最新反馈，仅基于tag)
+        # --- 关键修改：仅在 tag 中搜索，并严格限定在1年内 ---
+        filter_conditions.append(
+            and_(
+                StockDisclosure.tag.ilike(f'%调研%'),
+                StockDisclosure.ann_date >= one_year_ago_date 
             )
+        )
 
         if not filter_conditions:
             logger.warning(f"股票 {symbol}: 未配置有效的关键词筛选条件。")

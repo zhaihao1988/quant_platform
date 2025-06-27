@@ -1,9 +1,9 @@
 # db/crud.py
 import logging
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import asc, text, func, extract, desc
+from sqlalchemy import asc, text, func, extract, desc, and_, or_
 from typing import List, Optional, Dict, Any
-from datetime import date # <--- *** 在这里添加这一行 ***
+from datetime import date, timedelta
 import pandas as pd # <--- *** 确保 pandas 也已导入，因为函数返回 Optional[pd.DataFrame] ***
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -605,6 +605,92 @@ def update_stock_share_detail(db: Session, symbol: str, data: Dict[str, Any]) ->
         db.rollback()
         logger.error(f"更新/插入 StockShareDetail (symbol={symbol}) 时发生未知错误: {e}", exc_info=True)
         return None
+
+def get_recent_daily_data_as_text(db: Session, symbol: str, days_back: int = 30) -> str:
+    """
+    获取指定股票最近N天的日线交易数据，并格式化为适合LLM分析的文本。
+    
+    Args:
+        db: 数据库会话。
+        symbol: 股票代码。
+        days_back: 需要回溯的天数，默认为30。
+        
+    Returns:
+        一个包含交易数据或未找到数据信息的字符串。
+    """
+    end_date = date.today()
+    start_date = end_date - timedelta(days=days_back)
+    
+    records = db.query(StockDaily).filter(
+        StockDaily.symbol == symbol,
+        StockDaily.date >= start_date
+    ).order_by(StockDaily.date.asc()).all()
+
+    if not records:
+        return f"在 {start_date} 到 {end_date} 期间未找到股票 {symbol} 的交易数据。"
+
+    # 格式化为LLM友好的文本
+    header = "日期, 开盘价, 收盘价, 最高价, 最低价, 涨跌幅(%), 成交量(手)"
+    rows = [header]
+    for r in records:
+        row_str = (
+            f"{r.date.isoformat()}, "
+            f"{r.open:.2f}, "
+            f"{r.close:.2f}, "
+            f"{r.high:.2f}, "
+            f"{r.low:.2f}, "
+            f"{r.pct_change if r.pct_change is not None else 'N/A'}, "
+            f"{r.volume if r.volume is not None else 'N/A'}"
+        )
+        rows.append(row_str)
+        
+    return "\n".join(rows)
+
+def get_high_value_disclosures_for_summary(db: Session, symbol: str, num_reports: int = 2) -> List[StockDisclosure]:
+    """
+    获取近期最高价值的公告（年报/半年报/调研纪要）对象，用于LLM生成定性摘要。
+    会优先获取最新的年报/半年报，然后补充最新的调研纪要。
+    """
+    logger.info(f"正在为 {symbol} 提取近期高价值公告...")
+    one_year_ago = date.today() - timedelta(days=365 * 2) # 放宽到两年内
+
+    # 1. 优先获取最新的1份年报/半年报
+    report_keywords = ['年度报告', '半年度报告']
+    report_clauses = [StockDisclosure.title.ilike(f'%{kw}%') for kw in report_keywords]
+    
+    recent_reports = db.query(StockDisclosure).filter(
+        StockDisclosure.symbol == symbol,
+        StockDisclosure.ann_date >= one_year_ago,
+        and_(StockDisclosure.raw_content.isnot(None), StockDisclosure.raw_content != ''),
+        or_(*report_clauses)
+    ).order_by(
+        desc(StockDisclosure.ann_date)
+    ).limit(1).all()
+    
+    # 2. 获取最新的2份调研纪要
+    remaining_slots = num_reports - len(recent_reports)
+    recent_researches = []
+    if remaining_slots > 0:
+        research_keywords = ['调研', '投资者关系活动']
+        research_clauses = [StockDisclosure.tag.ilike(f'%{kw}%') for kw in research_keywords]
+        
+        recent_researches = db.query(StockDisclosure).filter(
+            StockDisclosure.symbol == symbol,
+            StockDisclosure.ann_date >= one_year_ago,
+            and_(StockDisclosure.raw_content.isnot(None), StockDisclosure.raw_content != ''),
+            or_(*research_clauses)
+        ).order_by(
+            desc(StockDisclosure.ann_date)
+        ).limit(remaining_slots).all()
+
+    all_disclosures = recent_reports + recent_researches
+    
+    # 去重，以防万一有公告同时满足两类条件
+    final_disclosures = {d.id: d for d in all_disclosures}.values()
+    
+    logger.info(f"为LLM摘要提取了 {len(final_disclosures)} 份高价值公告。")
+    return list(final_disclosures)
+
 def main():
     """
     主函数，用于测试 get_stock_daily_for_date 功能。

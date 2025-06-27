@@ -14,11 +14,12 @@ class LLMProvider(Protocol):
     """
     定义语言模型提供商必须遵循的接口协议 (Interface)。
     """
-    def generate(self, prompt: str, model: Optional[str] = None, **kwargs) -> Optional[str]:
+    def generate(self, prompt: str, model: Optional[str] = None, json_mode: bool = False, **kwargs) -> Optional[str]:
         """
         生成文本。
         - prompt: 发送给模型的提示。
         - model: (可选) 指定要使用的模型名称。如果为 None，则使用提供商的默认模型。
+        - json_mode: (可选) 如果为 True，请求模型以 JSON 格式输出。
         - kwargs: 其他特定于提供商的参数。
         """
         ...
@@ -35,7 +36,7 @@ class SiliconFlowProvider:
         if not self.api_key:
             raise ValueError("API key not found for SiliconFlow! Please check your settings.")
 
-    def generate(self, prompt: str, model: Optional[str] = None, **kwargs) -> Optional[str]:
+    def generate(self, prompt: str, model: Optional[str] = None, json_mode: bool = False, **kwargs) -> Optional[str]:
         """使用 SiliconFlow API 生成文本。"""
         target_model = model if model is not None else self.default_model
         endpoint = f"{self.base_url}/chat/completions"
@@ -51,6 +52,10 @@ class SiliconFlowProvider:
             "temperature": kwargs.get("temperature", 0.0),
             "stream": False
         }
+        if json_mode:
+            logger.info("JSON mode enabled for SiliconFlow request.")
+            payload["response_format"] = {"type": "json_object"}
+            
         try:
             logger.info(f"Sending request to SiliconFlow API with model: {target_model}...")
             proxies = {"http": None, "https": None}
@@ -76,7 +81,7 @@ class OllamaProvider:
         self.default_model = settings.OLLAMA_MODEL
         logger.info(f"Ollama provider initialized. Base URL: {self.base_url}, Default Model: {self.default_model}")
 
-    def generate(self, prompt: str, model: Optional[str] = None, **kwargs) -> Optional[str]:
+    def generate(self, prompt: str, model: Optional[str] = None, json_mode: bool = False, **kwargs) -> Optional[str]:
         """使用 Ollama API 生成文本。"""
         target_model = model if model is not None else self.default_model
         endpoint = f"{self.base_url}/api/generate"
@@ -89,6 +94,10 @@ class OllamaProvider:
                 "num_predict": kwargs.get("max_tokens", 4096),
             }
         }
+        if json_mode:
+            logger.info("JSON mode enabled for Ollama request.")
+            payload["format"] = "json"
+            
         try:
             logger.info(f"Sending request to Ollama API with model: {target_model}...")
             response = requests.post(endpoint, json=payload, timeout=300)

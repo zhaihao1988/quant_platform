@@ -2,13 +2,13 @@
 import re
 import logging
 from sentence_transformers import SentenceTransformer
-from config.settings import settings # Import settings
+from config.settings import settings, CORRECT_DIMENSION_1024 # Import settings and the correct dimension
 
 logger = logging.getLogger(__name__)
 
 # --- Configuration from settings ---
 EMBEDDING_MODEL_NAME = settings.EMBEDDING_MODEL_NAME
-EMBEDDING_DIM = settings.EMBEDDING_DIM
+EMBEDDING_DIM = CORRECT_DIMENSION_1024 # Use the new constant
 MAX_MODEL_INPUT_LENGTH = settings.EMBEDDING_MAX_LENGTH # Max sequence length for the embedding model
 
 # --- Global Model Loading ---
