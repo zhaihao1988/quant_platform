@@ -14,8 +14,58 @@ from urllib.parse import urljoin, urlparse, parse_qs
 import pdfplumber
 
 from core.llm_provider import SiliconFlowProvider
-# --- 关键修改：从新的 prompting 文件导入 Prompts ---
-from core.prompting import QA_EXTRACTION_PROMPT_V1, NARRATIVE_CLEANUP_PROMPT
+
+# --- Prompts moved from core/prompting.py to make this module self-contained ---
+
+QA_EXTRACTION_PROMPT_V1 = """
+You are an expert financial data extraction assistant. Your task is to carefully read the provided text from a company's investor relations activity record and extract all questions and their corresponding answers.
+
+**Instructions:**
+1.  Identify every question asked by an analyst or investor.
+2.  Identify the full, complete answer provided by the company's management.
+3.  Format the output as a single JSON object containing a key "qa_pairs".
+4.  The value of "qa_pairs" should be a list of objects, where each object has two keys: "question" and "answer".
+5.  If you cannot find any question-answer pairs in the text, return a JSON object with an empty list: `{{"qa_pairs": []}}`.
+6.  Do not summarize or alter the questions and answers. Extract them verbatim.
+
+**Example Output:**
+{{
+    "qa_pairs": [
+        {{
+            "question": "请问公司未来的主要增长点在哪些方面？",
+            "answer": "公司未来将主要聚焦于两个核心领域。首先是新能源汽车的智能底盘系统，特别是空气悬挂和线控制动。其次是我们在机器人领域的布局，特别是谐波减速器等核心零部件。"
+        }},
+        {{
+            "question": "关于海外业务的整合，目前进展如何？",
+            "answer": "海外业务的整合正在按计划顺利进行。我们已经完成了对德国AMK公司的初步整合，并开始在成本控制和供应链协同方面看到成效。预计明年会产生更显著的财务贡献。"
+        }}
+    ]
+}}
+
+--- Text to Analyze ---
+{text}
+--- End of Text ---
+
+Please provide the output in a single JSON object.
+"""
+
+NARRATIVE_CLEANUP_PROMPT = """
+You are an expert at processing financial documents. Your task is to read the following text from a company's financial report and extract the main narrative section, which is typically titled "Management Discussion and Analysis" or a similar variant. After extracting it, you must clean it up for readability.
+
+**Instructions:**
+1.  Identify and isolate the core "Management Discussion and Analysis" (经营情况讨论与分析) section.
+2.  Remove any irrelevant artifacts like page numbers, headers, footers, and table-of-contents entries.
+3.  Reconstruct paragraphs that have been broken by hard line breaks in the middle of sentences.
+4.  Ensure the final output is a clean, coherent, and readable block of text representing only the management's narrative.
+5.  If the text does not appear to contain a clear narrative discussion section, return an empty string.
+6.  Output only the cleaned-up text, with no extra explanations or titles.
+
+--- Document Text to Process ---
+{text}
+--- End of Document Text ---
+
+Please provide only the cleaned narrative text.
+"""
 
 # --- Selenium Imports ---
 try:
@@ -643,7 +693,7 @@ def extract_qa_with_ai(full_text: str, model_override: Optional[str] = None) -> 
         logger.info(f"此次调用将使用覆盖模型: {model_override}")
 
     # --- 使用从模块导入的 "黄金Prompt V1" ---
-    prompt = QA_EXTRACTION_PROMPT_V1.format(full_text=full_text)
+    prompt = QA_EXTRACTION_PROMPT_V1.format(text=full_text)
 
     try:
         # --- 使用工厂获取 Provider ---

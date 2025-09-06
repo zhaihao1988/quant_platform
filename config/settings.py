@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "siliconflow" # 可选 "ollama" 或 "siliconflow"
     
     # ---------- SiliconFlow 相关 ----------
-    SILICONFLOW_API_KEY: Optional[str] = None
+    SILICONFLOW_API_KEY: Optional[str] = "sk-vdyuhzjqucpcqkqebmqbbbgwycgrvltxhklfefpeuaxkvcaf"
     SILICONFLOW_MODEL: str = "Qwen/Qwen3-8B" 
 
     # ---------- Ollama 相关 ----------

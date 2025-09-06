@@ -17,6 +17,8 @@ from strategies.monthly_ma_pullback_strategy import MonthlyMAPullbackStrategy
 from strategies.multi_level_cross_refactored_strategy import RefactoredMultiLevelCrossStrategy
 from analysis.fundamental_analyzer import FundamentalAnalyzer
 from strategies.breakout_strategy import BreakoutStrategy
+from strategies.weekly_breakout_strategy import WeeklyBreakoutStrategy
+from strategies.monthly_breakout_strategy import MonthlyBreakoutStrategy
 from db.database import SessionLocal
 from db import crud
 from db.models import StockList
@@ -41,6 +43,7 @@ CSV_COLUMN_ORDER = [
     'revenue_growth_yoy',
     'profit_growth_yoy',
     'peg_like_ratio',
+    
     'net_profit_positive_3y_latest',
     'growth_positive',
     'pe_lt_30',
@@ -60,6 +63,8 @@ CONFIG = {
         BreakoutStrategy,
         WeeklyMAPullbackStrategy,
         MonthlyMAPullbackStrategy,
+        WeeklyBreakoutStrategy,
+        MonthlyBreakoutStrategy,
     ],
     "strategy_params": {  # 特定策略参数 (如果需要覆盖默认值)
         "AdaptedMAPullbackStrategy": {},
@@ -213,9 +218,9 @@ class MultiStrategyScreener:
             # 4. Combine and store results
             for tech_signal in generated_technical_signals_on_analysis_date:
                 signal_level = "Daily"  # Default
-                if tech_signal.strategy_name == "WeeklyMAPullbackStrategy":
+                if tech_signal.strategy_name in ["WeeklyMAPullbackStrategy", "WeeklyChanBreakoutStrategyV1"]:
                     signal_level = "Weekly"
-                elif tech_signal.strategy_name == "MonthlyMAPullbackStrategy":
+                elif tech_signal.strategy_name in ["MonthlyMAPullbackStrategy", "MonthlyChanBreakoutStrategyV1"]:
                     signal_level = "Monthly"
 
                 output_row = {
